@@ -37,8 +37,8 @@ data SomeNode = forall a. SomeNode (Node a)
 type NodeId = Int 
 
 
-newtype NodeRef a = NodeRef { unRef :: IORef (Either (NodeRef a -> EventM (Node a)) (Node a)) }
-newtype Event a = Event (NodeRef a)
+newtype NodeRef a = NodeRef { unRef :: IORef (Either (EventM (Node a)) (Node a)) }
+data Event a = Never | Event (NodeRef a)
 
 newtype EventHandle a = EventHandle { unEventHandle :: Event a }
 
@@ -70,25 +70,25 @@ instance MonadRef EventM where
 
 
 {-# NOINLINE unsafeCreateNode #-}
-unsafeCreateNode :: (NodeRef a -> EventM (Node a)) -> NodeRef a
-unsafeCreateNode action = NodeRef $ unsafePerformIO $ newIORef (Left action) 
+unsafeCreateNode :: EventM (Node a) -> NodeRef a
+unsafeCreateNode create = NodeRef $ unsafePerformIO $ newIORef (Left create) 
 
 
-createNode :: (NodeRef a -> EventM (Node a)) -> IO (NodeRef a)
-createNode action = NodeRef <$> newIORef (Left action) 
+createNode :: EventM (Node a) -> IO (NodeRef a)
+createNode create = NodeRef <$> newIORef (Left create) 
 
 
-unsafeCreateEvent :: (NodeRef a -> EventM (Node a)) -> Event a
+unsafeCreateEvent :: EventM (Node a) -> Event a
 unsafeCreateEvent = Event . unsafeCreateNode
 
 
-createEvent  :: (NodeRef a -> EventM (Node a)) -> IO (Event a)
-createEvent action = Event <$> createNode action
+createEvent  :: EventM (Node a) -> IO (Event a)
+createEvent create = Event <$> createNode create
 
 readNodeRef :: NodeRef a -> EventM (Node a)
-readNodeRef e@(NodeRef ref) = readRef ref >>= \case
-    Left action -> do
-      node <- action e
+readNodeRef (NodeRef ref) = readRef ref >>= \case
+    Left create -> do
+      node <- create
       writeRef ref (Right node)
       return node
     Right node -> return node
@@ -96,8 +96,10 @@ readNodeRef e@(NodeRef ref) = readRef ref >>= \case
     
 
 
-eventNode :: Event a -> EventM (Node a)
-eventNode (Event ref) = readNodeRef ref
+eventNode :: Event a -> EventM (Maybe (Node a))
+eventNode Never       = return Nothing
+eventNode (Event ref) = Just <$> readNodeRef ref
+
 
 data Function a where
   Push     ::  (a -> EventM (Maybe b)) -> Node a -> Function b
@@ -106,8 +108,7 @@ data Function a where
 
 
 data Node a = Node 
-  { nodeHandle    :: !(Weak (NodeRef a))
-  , nodeSubs      :: !(IORef [WeakNode])
+  { nodeSubs      :: !(IORef [WeakNode])
   , nodeValue     :: !(IORef (Maybe a))
   , nodeFunction  :: !(Function a) 
   , nodeHeight    :: !(IORef Int)  
@@ -122,68 +123,77 @@ weakPtr :: a -> EventM (Weak a)
 weakPtr a = liftIO (mkWeakPtr a Nothing)
   
   
-newNode :: Int -> NodeRef a -> Function a -> EventM (Node a)
-newNode height self f = do
+newNode :: Height -> Function a -> EventM (Node a)
+newNode height f = do
   
   newId <- readRef nextIdRef
   writeRef nextIdRef (succ newId)
   
-  Node <$> weakPtr self
-       <*> newRef []
+  Node <$> newRef []
        <*> newRef Nothing
        <*> pure f
        <*> newRef height
        <*> pure newId
        
       
-      
-subscribe :: Node a -> Node b -> EventM ()
-subscribe node parent = do
-  weakNode <- WeakNode <$> weakPtr node
-  modifyRef (nodeSubs parent) (weakNode :)
-  
-    
-push :: (a -> EventM (Maybe b)) -> Event a -> Event b
-push f e =  unsafeCreateEvent $ \self -> do  
-  parent <- eventNode e
-  height <- readHeight parent
-  node <- newNode height self (Push f parent) 
-  subscribe node parent  
-  return node
-
-merge :: Semigroup a => [Event a] -> Event a
-merge es =  unsafeCreateEvent $ \self -> do  
-  
-  parents <- traverse eventNode es
-  height <- maximum <$> traverse readHeight parents
-  let parentMap = IntMap.fromList $ (\p -> (nodeId p, p)) <$> parents
-  
-  func <- Merge <$> newRef [] <*> pure parentMap
-  node <- newNode (succ height) self func 
-  traverse_ (subscribe node) parents
-  return node
-
-  
-
-eventRoot :: IO (Event a)
-eventRoot = createEvent $ \self -> newNode 0 self Root
-
-
-
-
 readNodeMaybe :: Node a -> EventM (Maybe a)
 readNodeMaybe node = readRef (nodeValue node)
 
 
 readEvent :: EventHandle a -> EventM (Maybe a)
-readEvent (EventHandle e) = readNodeMaybe =<< eventNode e
+readEvent (EventHandle e) = fmap join <$> traverse readNodeMaybe =<< eventNode e
+      
+      
+subscribe :: Node a -> Node b -> EventM ()
+subscribe node parent = do
+  weakNode <- WeakNode <$> weakPtr node
+  modifyRef (nodeSubs parent) (weakNode :)
+
   
+catEvents :: [Event a] -> [NodeRef a]
+catEvents events = [ref | Event ref <- events]  
+
+nodeMap :: [Node a] -> IntMap (Node a)
+nodeMap = IntMap.fromList . map (\node -> (nodeId node, node))
+  
+
+  
+-- Event types
+push :: (a -> EventM (Maybe b)) -> Event a -> Event b
+push f Never = Never
+push f (Event ref) =  unsafeCreateEvent $ do  
+  parent <- readNodeRef ref
+  height <- readHeight parent
+  node <- newNode height  (Push f parent) 
+  subscribe node parent  
+  return node
+  
+  
+merge :: Semigroup a => [Event a] -> Event a
+merge = merge' . catEvents where
+  merge' []       = Never
+  merge' refs = unsafeCreateEvent $  do  
+    parents <- traverse readNodeRef refs
+    height <- maximum <$> traverse readHeight parents  
+    func <- Merge <$> newRef [] <*> pure (nodeMap parents)
+    node <- newNode (succ height) func 
+    traverse_ (subscribe node) parents
+    return node
+  
+never :: Event a
+never = Never
+
+  
+newEventWithFire :: IO (Event a, a -> Trigger)
+newEventWithFire = do
+  root <- createNode $ newNode 0 Root
+  return (Event root, Trigger root)
   
   
 
 
 data Trigger where
-  Trigger :: a -> Event a -> Trigger
+  Trigger ::  NodeRef a -> a -> Trigger
 
 
 clearNode :: SomeNode -> IO ()
@@ -201,11 +211,11 @@ writeNode node a = do
   modifyRef clearRef (SomeNode node :)
 
 
-trigger :: Trigger -> EventM ()
-trigger (Trigger a e) = do
-  root <- eventNode e
+trigger :: Trigger -> EventM SomeNode
+trigger (Trigger ref a) = do
+  root <- readNodeRef ref
   writeNode root a
-  propagate 0 root
+  return (SomeNode root)
  
  
   
@@ -237,7 +247,6 @@ schedule node height = do
 
 propagate ::  Height -> Node a -> EventM () 
 propagate  height parent = modifyM  (nodeSubs parent) (traverseWeak propagate') where
-  
   
   propagate' :: forall a. Node a -> EventM ()
   propagate' child = case nodeFunction child of
@@ -277,10 +286,6 @@ subscribeEvent :: Event a -> IO (EventHandle a)
 subscribeEvent e = runEventM $ do
   void (eventNode e)
   return (EventHandle e)
-
-propagateDelay :: Height -> SomeNode ->  EventM ()
-propagateDelay height (SomeNode node) = do  
-  evaluate node >> propagate height node
   
 
 
@@ -297,18 +302,16 @@ takeDelay = do
 runFrame :: [Trigger] -> EventHandle a -> IO (Maybe a)
 runFrame triggers e = runEventM $ do
 
-  traverse_ trigger triggers
-  runDelays
+  roots <- traverse trigger triggers
+  runDelays (0, roots)
   readEvent e <* endFrame
   
   where
-    runDelays = do
-      mayDelay <- takeDelay
-      for_ mayDelay $ \(height, nodes) -> do
-        traverse_ (propagateDelay height) nodes  
-        runDelays
+    runDelays (height, nodes) = do
+      traverse_ (continue height) nodes  
+      traverse_ runDelays =<< takeDelay
         
- 
+    continue height (SomeNode node) = evaluate node >> propagate height node
   
   
 instance Functor Event where
@@ -318,15 +321,15 @@ instance Functor Event where
   
 main = do
   
-  input1 <- eventRoot
-  input2 <- eventRoot 
+  (input1, fire1) <- newEventWithFire
+  (input2, fire2) <- newEventWithFire 
 
   
-  let len   =  foldr1 (+) <$> merge [ (pure <$> input1) :: Event [Int], (pure <$> (+1) <$> input2)]
+  let len   =  foldr1 (+) <$> merge [ (pure <$> input1) :: Event [Int], (pure <$> (+1) <$> input2), never]
       test1  = merge [ pure <$> input2, pure <$> len ]
       test  = merge [ test1, pure <$> input2 ]
   
   handle <- subscribeEvent test
-  x <- runFrame [Trigger 4 input2, Trigger 4 input1] handle
+  x <- runFrame [fire2 4, fire1 4] handle
   print (x :: Maybe [Int])
 
