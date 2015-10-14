@@ -31,11 +31,10 @@ import qualified Data.List.NonEmpty as NE
 import Data.IntMap (IntMap)
 import qualified Data.IntMap as IntMap
 
-data WeakNode = forall a. WeakNode { unNode :: Weak (Node a) }
-  
-data SomeNode = forall a. SomeNode (Node a)
 type NodeId = Int 
 
+data WeakNode = forall a. WeakNode { unNode :: Weak (Node a) }
+data SomeNode = forall a. SomeNode (Node a)
 
 newtype NodeRef a = NodeRef { unRef :: IORef (Either (EventM (Node a)) (Node a)) }
 data Event a = Never | Event (NodeRef a)
