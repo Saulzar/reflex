@@ -34,9 +34,8 @@ import qualified Data.IntMap as IntMap
 
 type NodeId = Int 
 
-data WeakSub b = forall a. WeakSub { unSub :: Weak (Node b a) }
-data SomeNode = forall b a. SomeNode { unSome :: Node b a }
-data OutNode a = forall b. OutNode { unOut :: Node b a }
+
+data SomeNode = forall a. SomeNode { unSome :: Node a }
 
 newtype NodeRef a = NodeRef { unRef :: IORef (Either (EventM (OutNode a)) (OutNode a)) }
 data Event a = Never | Event (NodeRef a)
@@ -46,18 +45,27 @@ newtype EventHandle a = EventHandle { unEventHandle :: Event a }
 type Height = Int
 
 
-data Function b a where
-  Memo     :: OutNode a -> IORef (Maybe a) -> Function a a
-  Push     :: OutNode b -> (b -> EventM (Maybe a))  -> Function b a
-  Merge    :: Semigroup a => IntMap (OutNode a) -> IORef [a] -> Function a a
-  Root     :: Function a a
+data Subscriber a where
+  Push     :: Node b -> (a -> EventM (Maybe b)) -> Subscriber a
+  Merge    ::  GCompare k => Node (DMap k) ->  k a -> Subscriber a
+  
 
 
-data Node b a = Node 
-  { nodeSubs      :: !(IORef [WeakSub a])
-  , nodeFunction  :: !(Function b a) 
+data Parent a where
+  Parent    :: Node b -> Parent a
+  MapParent :: DMap (WrapArg Node k) -> Parent a
+  
+  
+
+-- type Subscriber a = Weak (a -> EventM ())
+
+
+data Node a = Node 
+  { nodeSubs      :: !(IORef [Weak (Subscriber a)])
+  , nodeValue     :: !(IORef a)
   , nodeHeight    :: !(IORef Int)  
   , nodeId        :: !NodeId
+  , nodeParents     :: !(Parent a)
   }
 
   
