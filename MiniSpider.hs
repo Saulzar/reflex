@@ -24,6 +24,9 @@ import Data.Functor
 import Data.Maybe
 import Data.Void
 
+import Data.Functor.Misc
+import qualified Data.Dependent.Map as DMap
+
 import Data.Semigroup
 import qualified Data.List.NonEmpty as NE
 
@@ -32,12 +35,11 @@ import qualified Data.List.NonEmpty as NE
 import Data.IntMap (IntMap)
 import qualified Data.IntMap as IntMap
 
-type NodeId = Int 
 
 
 data SomeNode = forall a. SomeNode { unSome :: Node a }
 
-newtype NodeRef a = NodeRef { unRef :: IORef (Either (EventM (OutNode a)) (OutNode a)) }
+newtype NodeRef a = NodeRef { unRef :: IORef (Either (EventM (Node a)) (Node a)) }
 data Event a = Never | Event (NodeRef a)
 
 newtype EventHandle a = EventHandle { unEventHandle :: Event a }
@@ -45,15 +47,16 @@ newtype EventHandle a = EventHandle { unEventHandle :: Event a }
 type Height = Int
 
 
-data Subscriber a where
-  Push     :: Node b -> (a -> EventM (Maybe b)) -> Subscriber a
-  Merge    ::  GCompare k => Node (DMap k) ->  k a -> Subscriber a
+-- data Subscriber a where
+--   Push     :: Node b -> (a -> EventM (Maybe b)) -> Subscriber a
+--   Merge    ::  GCompare k => Node (DMap k) ->  k a -> Subscriber a
   
 
+type Subscriber a = Height -> a -> EventM ()
 
-data Parent a where
-  Parent    :: Node b -> Parent a
-  MapParent :: DMap (WrapArg Node k) -> Parent a
+-- data Parents where
+--   Parent    :: Node a -> Parent
+--   MapParent :: DMap (WrapArg Node k) -> Parent
   
   
 
@@ -62,18 +65,10 @@ data Parent a where
 
 data Node a = Node 
   { nodeSubs      :: !(IORef [Weak (Subscriber a)])
-  , nodeValue     :: !(IORef a)
   , nodeHeight    :: !(IORef Int)  
-  , nodeId        :: !NodeId
-  , nodeParents     :: !(Parent a)
+  , nodeParents   :: ![SomeNode]
+  , nodeValue     :: !(IORef (Maybe a))
   }
-
-  
-
-
-{-# NOINLINE nextIdRef #-}
-nextIdRef :: IORef NodeId
-nextIdRef = unsafePerformIO $ newIORef 0
 
 
 data Env = Env 
@@ -96,22 +91,22 @@ instance MonadRef EventM where
   
 
 {-# NOINLINE unsafeCreateNode #-}
-unsafeCreateNode :: EventM (OutNode a) -> NodeRef a
+unsafeCreateNode :: EventM (Node a) -> NodeRef a
 unsafeCreateNode create = NodeRef $ unsafePerformIO $ newIORef (Left create) 
 
 
-createNode :: EventM (OutNode a) -> IO (NodeRef a)
+createNode :: EventM (Node a) -> IO (NodeRef a)
 createNode create = NodeRef <$> newIORef (Left create) 
 
 
-unsafeCreateEvent :: EventM (OutNode a) -> Event a
+unsafeCreateEvent :: EventM (Node a) -> Event a
 unsafeCreateEvent = Event . unsafeCreateNode
 
 
-createEvent  :: EventM (OutNode a) -> IO (Event a)
+createEvent  :: EventM (Node a) -> IO (Event a)
 createEvent create = Event <$> createNode create
 
-readNodeRef :: NodeRef a -> EventM (OutNode a)
+readNodeRef :: NodeRef a -> EventM (Node a)
 readNodeRef (NodeRef ref) = readRef ref >>= \case
     Left create -> do
       node <- create
@@ -120,84 +115,67 @@ readNodeRef (NodeRef ref) = readRef ref >>= \case
     Right node -> return node
     
     
-eventNode :: Event a -> EventM (Maybe (OutNode a))
+eventNode :: Event a -> EventM (Maybe (Node a))
 eventNode Never       = return Nothing
 eventNode (Event ref) = Just <$> readNodeRef ref
 
 
-outId :: OutNode a -> NodeId
-outId (OutNode node) = nodeId node
   
-readHeight :: OutNode a -> EventM Int
-readHeight (OutNode node) = readRef (nodeHeight node)
+readHeight :: Node a -> EventM Int
+readHeight node = readRef (nodeHeight node)
 
 weakPtr :: a -> EventM (Weak a)
 weakPtr a = liftIO (mkWeakPtr a Nothing)
   
   
-newNode :: Height -> Function b a -> EventM (Node b a)
-newNode height f = do
-  
-  newId <- readRef nextIdRef
-  writeRef nextIdRef (succ newId)
-  
-  Node <$> newRef []
-       <*> pure f
-       <*> newRef height
-       <*> pure newId
+newNode :: Height -> [SomeNode] -> Maybe a -> EventM (Node a)
+newNode height parents value = 
+  Node <$> newRef [] <*> newRef height <*> pure parents <*> newRef value
        
 
-      
-readNodeMaybe :: OutNode a -> EventM (Maybe a)
-readNodeMaybe (OutNode node) = case nodeFunction node of 
-  Memo _ ref -> readRef ref
-  _          -> return Nothing
+readNode :: Node a -> EventM (Maybe a)
+readNode node = readRef (nodeValue node)
 
+writeNode :: Node a -> a -> EventM ()
+writeNode node a = do
+  writeRef (nodeValue node) (Just a)
+  clearsRef <- asks clears
+  modifyRef clearsRef (SomeNode node :)
+  
 readEvent :: EventHandle a -> EventM (Maybe a)
-readEvent (EventHandle e) = fmap join <$> traverse readNodeMaybe =<< eventNode e
+readEvent (EventHandle e) = fmap join <$> traverse readNode =<< eventNode e
 
   
-subscribe :: Node b c  -> OutNode b -> EventM ()
-subscribe node (OutNode parent) = do
-  weakSub <- WeakSub <$> weakPtr node
-  modifyRef (nodeSubs parent) (weakSub :)
+subscribe :: Node a -> Subscriber a -> EventM ()
+subscribe node sub = do
+  weakSub <- weakPtr sub
+  modifyRef (nodeSubs node) (weakSub :)
 
   
 catEvents :: [Event a] -> [NodeRef a]
 catEvents events = [ref | Event ref <- events]  
 
-nodeMap :: [OutNode a] -> IntMap (OutNode a)
-nodeMap = IntMap.fromList . map (\node -> (outId node, node))
-  
 
-simpleEvent :: (OutNode a -> EventM (Function a b)) -> Event a -> Event b
-simpleEvent makeFunc Never = Never
-simpleEvent makeFunc (Event ref) =  unsafeCreateEvent $ do  
-  parent <- readNodeRef ref
-  height <- readHeight parent
-  node <- newNode height  =<< makeFunc parent
-  subscribe node parent  
-  return (OutNode node)
-  
--- Event types
 push :: (a -> EventM (Maybe b)) -> Event a -> Event b
-push f = simpleEvent (\parent -> return $ Push parent f)
+push f Never = Never
+push f (Event ref) =  unsafeCreateEvent $ do 
+  parent <- readNodeRef ref  
+  value  <- traverse f =<< readNode parent
+  node <- newNode <$> readHeight parent <*> pure [SomeNode parent] <*> pure value
+  subscribe parent (\height -> f >=> traverse_ (writePropagate height node))  
+  return node  
 
   
-memo :: Event a -> Event a  
-memo = simpleEvent $ \parent -> Memo parent <$> newRef Nothing
-
-  
-merge :: Semigroup a => [Event a] -> Event a
-merge = merge' . catEvents where
-  merge' []       = Never
-  merge' refs = unsafeCreateEvent $  do  
-    parents <- traverse readNodeRef refs
-    height <- maximum <$> traverse readHeight parents  
-    func <- Merge <$> pure (nodeMap parents) <*> newRef []
-    node <- newNode (succ height) func 
-    traverse_ (subscribe node) parents
-    return (OutNode node)
+-- merge :: Semigroup a => [Event a] -> Event a
+-- merge = merge' . catEvents where
+--   merge' []       = Never
+--   merge' refs = unsafeCreateEvent $  do  
+--     parents <- traverse readNodeRef refs
+--     height <- maximum <$> traverse readHeight parents  
+--     func <- Merge <$> pure (nodeMap parents) <*> newRef []
+--     node <- newNode (succ height) func 
+--     traverse_ (subscribe node) parents
+--     return (Node node)
   
 never :: Event a
 never = Never
@@ -205,7 +183,7 @@ never = Never
 
 newEventWithFire :: IO (Event a, a -> Trigger)
 newEventWithFire = do
-  root <- createNode $ OutNode <$> newNode 0 Root
+  root <- createNode $ Node <$> newNode 0 [] Nothing
   return (Event root, Trigger root)
   
 
@@ -216,67 +194,42 @@ data Trigger where
 
     
 clearNode :: SomeNode -> IO ()
-clearNode (SomeNode node) = do
-  case nodeFunction node of
-    _                 -> return ()
+clearNode (SomeNode node) = writeRef (nodeValue node) Nothing
     
 
-
-readNode :: OutNode a -> EventM a
-readNode node = do
-  m <- readNodeMaybe node
-  case m of
-    Just a  -> return a
-    Nothing -> error "readNode failed: node not yet evaluated"
-
-
-
-traverseWeak :: (forall a. Node b a -> EventM ()) -> [WeakSub b] -> EventM [WeakSub b]
+traverseWeak :: (a -> EventM ()) -> [Weak a] -> EventM [Weak a]
 traverseWeak f subs = do
-  flip filterM subs $ \(WeakSub weak) -> do 
+  flip filterM subs $ \weak -> do 
     m <- liftIO (deRefWeak weak)
-    isJust m <$ mapM_ f m 
+    isJust m <$ traverse_ f m 
 
 
 modifyM :: MonadRef m => Ref m a -> (a -> m a) -> m ()
 modifyM ref f = readRef ref >>= f >>= writeRef ref
     
     
-delay :: Node b a -> Height ->  EventM ()    
+delay :: Node a -> Height ->  EventM ()    
 delay node height = do
   delayRef <- asks delays
   modifyRef delayRef insert
     where insert = IntMap.insertWith (<>) height [SomeNode node]
 
-propagateFrom ::  Height -> a -> Node b a -> EventM () 
-propagateFrom  height a parent = modifyM  (nodeSubs parent) $ 
-  traverseWeak (propagateTo height a)
-
-
-propagateTo :: Height -> b -> Node b a -> EventM ()
-propagateTo height b child = case nodeFunction child of
-  Merge _ ref -> modifyM ref $ \bs -> do
-    when (null bs) $ do
-      delay child =<< readRef (nodeHeight child)
-    return (b : bs)
-      
-  Push _ f    -> f b >>= traverse_ (\a -> propagateFrom height a child)
-  Memo _ ref  -> writeRef ref (Just b) >> propagateFrom height b child
-  Root        -> error "propagate': root nodes should not recieve events"
-          
-          
     
+writePropagate ::  Height -> Node a -> a -> EventM () 
+writePropagate  height node value = do
+  writeNode node value
+  propagate height node value
    
-propagateDelayed :: Height -> SomeNode -> EventM ()
-propagateDelayed height (SomeNode node) = case nodeFunction node of
-    Merge _ ref  -> do
-      a <- sconcat . NE.fromList <$> readRef ref
-      writeRef ref []
-      propagateFrom height a node
-      
-    _ -> error "propagateDelayed: unexpected delayed node type"
+    
+propagate ::  Height -> Node a -> a -> EventM () 
+propagate  height node value = modifyM  (nodeSubs node) $ 
+  traverseWeak (\prop -> prop height value)
 
 
+propagateDelayed :: Height -> Node a -> EventM ()
+propagateDelayed height node = do
+  readNode node >>= traverse_ (propagate height node)
+  
 
 runEventM :: EventM a -> IO a
 runEventM (EventM action) = do
@@ -292,9 +245,9 @@ endFrame = do
   
 subscribeEvent :: Event a -> IO (EventHandle a)  
 subscribeEvent e = runEventM $ do
-  void (eventNode m)
-  return $ EventHandle m
-    where m = memo e
+  void (eventNode e)
+  return (EventHandle <$> e)
+  
   
 
 takeDelay :: EventM (Maybe (Height, [SomeNode]))
@@ -320,8 +273,8 @@ runFrame triggers e = runEventM $ do
         runDelays)
         
     propagateRoot (Trigger nodeRef a) = do
-      (OutNode node) <- readNodeRef nodeRef 
-      propagateFrom 0 a node
+      node <- readNodeRef nodeRef 
+      writePropagate 0 node a
 
   
   
@@ -333,13 +286,13 @@ main = do
   
   (input1, fire1) <- newEventWithFire
   (input2, fire2) <- newEventWithFire 
-
+{-
   
   let len   =  foldr1 (+) <$> merge [ (pure <$> input1) :: Event [Int], (pure <$> (+1) <$> input2), never]
       test1  = merge [ pure <$> input2, pure <$> len ]
-      test  = merge [ test1, pure <$> input2 ]
+      test  = merge [ test1, pure <$> input2 ]-}
   
-  handle <- subscribeEvent test
+  handle <- subscribeEvent ((+3) <$> input1) 
   x <- runFrame [fire2 4, fire1 4] handle
   print (x :: Maybe [Int])
 
