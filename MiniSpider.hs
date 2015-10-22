@@ -8,6 +8,11 @@
 {-# LANGUAGE RankNTypes #-}
 
 
+import Criterion.Main
+import Data.List.Split
+
+import Data.Random hiding (sample)
+import Data.Random.Source.DevRandom
 
 
 import Data.IORef
@@ -22,6 +27,7 @@ import Data.Foldable
 import Data.Traversable
 import Data.Functor
 import Data.Maybe
+import Data.List
 import Data.Void
 
 import Data.Functor.Misc
@@ -30,6 +36,7 @@ import qualified Data.Dependent.Map as DMap
 import Data.Dependent.Map (DMap, GCompare)
 
 import Data.Dependent.Sum 
+
 
 
 import Data.Semigroup
@@ -178,24 +185,6 @@ push f (Event ref) =  unsafeCreateEvent $ do
   
   
 
-catEvents ::  [DSum (WrapArg Event k)] -> [DSum (WrapArg NodeRef k)]
-catEvents events = [(WrapArg k) :=> ref | (WrapArg k) :=> Event ref <- events]   
-
-traverseDSums :: Applicative m => (forall a. f a -> m (g a)) -> [DSum (WrapArg f k)] -> m [DSum (WrapArg g k)]
-traverseDSums f = traverse (\(WrapArg k :=> v) -> (WrapArg k :=>) <$> f v)
-  
-mapDSums :: (forall a. f a -> b) -> [DSum (WrapArg f k)] -> [b]
-mapDSums f = map (\(WrapArg k :=> v) -> f v)
-
-
-catDSums :: [DSum (WrapArg Maybe k)] -> [DSum k]
-catDSums = catMaybes . map toMaybe
-  
-toMaybe :: DSum (WrapArg Maybe k)  -> Maybe (DSum k)
-toMaybe (WrapArg k :=> Just v ) = Just (k :=> v)
-toMaybe (WrapArg k :=> Nothing) = Nothing
-  
-
 merge :: GCompare k => DMap (WrapArg Event k) -> Event (DMap k)
 merge = merge' . catEvents . DMap.toAscList where
   merge' []       = Never
@@ -322,18 +311,52 @@ instance Functor Event where
   fmap f e = push (return .   Just . f) e
   
   
-main = do
+mergeTree ::  Int -> [Event Int] -> Event Int
+mergeTree n es | length es <= n = mergeWith (+) es
+               | otherwise = mergeTree n subTrees
+  where
+    merges = chunksOf n es
+    subTrees = map (id <$> id <$> mergeWith (+)) merges
   
-  (input1, fire1) <- newEventWithFire
-  (input2, fire2) <- newEventWithFire 
+
+makeTree = do
+  (es, fires) <- unzip <$> for [1..10000] (const newEventWithFire)
+  return (mergeTree 10 es, fires)
   
   
-  let out = mergeList [input1, input2, (+1) <$> input1, (+2) <$> input2]
+mergeSubscribe = do
+  (e, fires) <- makeTree
+  subscribeEvent e
+   
+  
+mergeFiring = do
+  (e, fires) <- makeTree
+  handle <- subscribeEvent e  
+  
+  for_ (transpose $ chunksOf 10 fires) $ \firing -> do
+    print =<< runFrame (zipWith ($) firing [1..]) handle
+
+  return ()
   
   
-  handle <- subscribeEvent out
-  x <- runFrame [fire2 4, fire1 2] handle
-  print (x :: Maybe [Int])
+  
+main = defaultMain 
+  [ bench "mergeSubscribe" $ whnfIO mergeSubscribe
+  , bench "mergeFiring" $ whnfIO $ mergeFiring 
+  ]  
+  
+-- main = do
+--   
+--   (input1, fire1) <- newEventWithFire
+--   (input2, fire2) <- newEventWithFire 
+--   
+--   
+--   let out = mergeList [input1, input2, (+1) <$> input1, (+2) <$> input2]
+--   
+--   
+--   handle <- subscribeEvent out
+--   x <- runFrame [fire2 4, fire1 2] handle
+--   print (x :: Maybe [Int])
 
 
   
@@ -350,3 +373,24 @@ mergeWith f es =  foldl1 f <$> mergeList es
   
 mergeList ::  [Event a] -> Event [a]
 mergeList es = fromDMap <$> merge (eventDMap es) 
+
+
+
+-- DMap utilities
+ 
+
+catEvents ::  [DSum (WrapArg Event k)] -> [DSum (WrapArg NodeRef k)]
+catEvents events = [(WrapArg k) :=> ref | (WrapArg k) :=> Event ref <- events]   
+
+traverseDSums :: Applicative m => (forall a. f a -> m (g a)) -> [DSum (WrapArg f k)] -> m [DSum (WrapArg g k)]
+traverseDSums f = traverse (\(WrapArg k :=> v) -> (WrapArg k :=>) <$> f v)
+  
+mapDSums :: (forall a. f a -> b) -> [DSum (WrapArg f k)] -> [b]
+mapDSums f = map (\(WrapArg k :=> v) -> f v)
+
+catDSums :: [DSum (WrapArg Maybe k)] -> [DSum k]
+catDSums = catMaybes . map toMaybe
+  
+toMaybe :: DSum (WrapArg Maybe k)  -> Maybe (DSum k)
+toMaybe (WrapArg k :=> Just v ) = Just (k :=> v)
+toMaybe (WrapArg k :=> Nothing) = Nothing
