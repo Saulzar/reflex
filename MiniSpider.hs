@@ -161,10 +161,10 @@ push f Never = Never
 push f (Event ref) =  unsafeCreateEvent $ do 
   parent <- readNodeRef ref  
   value  <- traverse f =<< readNode parent
-  node <- newNode <$> readHeight parent <*> pure [SomeNode parent] <*> pure value
+  node <- join $ newNode <$> readHeight parent <*> pure [SomeNode parent] <*> pure (join value)
   subscribe parent (\height -> f >=> traverse_ (writePropagate height node))  
   return node  
-
+  
   
 -- merge :: Semigroup a => [Event a] -> Event a
 -- merge = merge' . catEvents where
