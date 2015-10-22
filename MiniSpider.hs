@@ -25,7 +25,12 @@ import Data.Maybe
 import Data.Void
 
 import Data.Functor.Misc
+
 import qualified Data.Dependent.Map as DMap
+import Data.Dependent.Map (DMap, GCompare)
+
+import Data.Dependent.Sum 
+
 
 import Data.Semigroup
 import qualified Data.List.NonEmpty as NE
@@ -39,7 +44,14 @@ import qualified Data.IntMap as IntMap
 
 data SomeNode = forall a. SomeNode { unSome :: Node a }
 
-newtype NodeRef a = NodeRef { unRef :: IORef (Either (EventM (Node a)) (Node a)) }
+-- data MakeNode a where
+--  MakePush :: Node a -> (a -> EventM (Maybe b)) -> MakeNode b
+--  MakeMerge :: GCompare k => DMap (WrapArg Event k) -> MakeNode (DMap k)
+
+
+type MakeNode a = EventM (Node a)
+
+newtype NodeRef a = NodeRef { unRef :: IORef (Either (MakeNode a) (Node a)) }
 data Event a = Never | Event (NodeRef a)
 
 newtype EventHandle a = EventHandle { unEventHandle :: Event a }
@@ -47,20 +59,21 @@ newtype EventHandle a = EventHandle { unEventHandle :: Event a }
 type Height = Int
 
 
+-- Data structure based Subscriber
+
 -- data Subscriber a where
 --   Push     :: Node b -> (a -> EventM (Maybe b)) -> Subscriber a
 --   Merge    ::  GCompare k => Node (DMap k) ->  k a -> Subscriber a
-  
 
-type Subscriber a = Height -> a -> EventM ()
 
 -- data Parents where
 --   Parent    :: Node a -> Parent
 --   MapParent :: DMap (WrapArg Node k) -> Parent
-  
+
   
 
--- type Subscriber a = Weak (a -> EventM ())
+type Subscriber a = Height -> a -> EventM ()
+
 
 
 data Node a = Node 
@@ -151,9 +164,6 @@ subscribe node sub = do
   weakSub <- weakPtr sub
   modifyRef (nodeSubs node) (weakSub :)
 
-  
-catEvents :: [Event a] -> [NodeRef a]
-catEvents events = [ref | Event ref <- events]  
 
 
 push :: (a -> EventM (Maybe b)) -> Event a -> Event b
@@ -162,20 +172,49 @@ push f (Event ref) =  unsafeCreateEvent $ do
   parent <- readNodeRef ref  
   value  <- traverse f =<< readNode parent
   node <- join $ newNode <$> readHeight parent <*> pure [SomeNode parent] <*> pure (join value)
-  subscribe parent (\height -> f >=> traverse_ (writePropagate height node))  
+  subscribe parent $ \height -> 
+    f >=> traverse_ (writePropagate height node)
   return node  
   
   
--- merge :: Semigroup a => [Event a] -> Event a
--- merge = merge' . catEvents where
---   merge' []       = Never
---   merge' refs = unsafeCreateEvent $  do  
---     parents <- traverse readNodeRef refs
---     height <- maximum <$> traverse readHeight parents  
---     func <- Merge <$> pure (nodeMap parents) <*> newRef []
---     node <- newNode (succ height) func 
---     traverse_ (subscribe node) parents
---     return (Node node)
+
+catEvents ::  [DSum (WrapArg Event k)] -> [DSum (WrapArg NodeRef k)]
+catEvents events = [(WrapArg k) :=> ref | (WrapArg k) :=> Event ref <- events]   
+
+traverseDSums :: Applicative m => (forall a. f a -> m (g a)) -> [DSum (WrapArg f k)] -> m [DSum (WrapArg g k)]
+traverseDSums f = traverse (\(WrapArg k :=> v) -> (WrapArg k :=>) <$> f v)
+  
+mapDSums :: (forall a. f a -> b) -> [DSum (WrapArg f k)] -> [b]
+mapDSums f = map (\(WrapArg k :=> v) -> f v)
+
+
+catDSums :: [DSum (WrapArg Maybe k)] -> [DSum k]
+catDSums = catMaybes . map toMaybe
+  
+toMaybe :: DSum (WrapArg Maybe k)  -> Maybe (DSum k)
+toMaybe (WrapArg k :=> Just v ) = Just (k :=> v)
+toMaybe (WrapArg k :=> Nothing) = Nothing
+  
+
+merge :: GCompare k => DMap (WrapArg Event k) -> Event (DMap k)
+merge = merge' . catEvents . DMap.toAscList where
+  merge' []       = Never
+  merge' refs = unsafeCreateEvent $  do     
+    parents <- traverseDSums readNodeRef refs
+    height <- maximum <$> sequence (mapDSums readHeight parents)
+    values <- catDSums <$> traverseDSums readNode parents
+    node <- newNode height (mapDSums SomeNode parents) (DMap.fromDistinctAscList values <$ listToMaybe values)    
+    traverse_ (subscribe' node) parents
+    return node
+
+  subscribe' :: GCompare k => Node (DMap k) -> DSum (WrapArg Node k) -> EventM ()
+  subscribe' node (WrapArg k :=> parent) = subscribe parent $ \height value -> do
+    modifyM (nodeValue node) $ \case 
+      Nothing -> do
+        delay node =<< readHeight node
+        return (Just $ DMap.singleton k value)
+      Just m  -> pure . Just $ DMap.insert k value m
+
   
 never :: Event a
 never = Never
@@ -183,7 +222,7 @@ never = Never
 
 newEventWithFire :: IO (Event a, a -> Trigger)
 newEventWithFire = do
-  root <- createNode $ Node <$> newNode 0 [] Nothing
+  root <- createNode $ newNode 0 [] Nothing
   return (Event root, Trigger root)
   
 
@@ -226,8 +265,8 @@ propagate  height node value = modifyM  (nodeSubs node) $
   traverseWeak (\prop -> prop height value)
 
 
-propagateDelayed :: Height -> Node a -> EventM ()
-propagateDelayed height node = do
+propagateDelayed :: Height -> SomeNode -> EventM ()
+propagateDelayed height (SomeNode node) = do
   readNode node >>= traverse_ (propagate height node)
   
 
@@ -241,17 +280,18 @@ endFrame :: EventM ()
 endFrame = do
   cs <- readRef =<< asks clears
   liftIO $ traverse_ clearNode cs 
+  
 
   
 subscribeEvent :: Event a -> IO (EventHandle a)  
 subscribeEvent e = runEventM $ do
   void (eventNode e)
-  return (EventHandle <$> e)
+  return (EventHandle e)
   
   
 
-takeDelay :: EventM (Maybe (Height, [SomeNode]))
-takeDelay = do
+takeDelayed :: EventM (Maybe (Height, [SomeNode]))
+takeDelayed = do
   delaysRef <- asks delays
   delayed <- readRef delaysRef
   
@@ -268,7 +308,7 @@ runFrame triggers e = runEventM $ do
   readEvent e <* endFrame
   
   where
-    runDelays = takeDelay >>= traverse_  (\(height, nodes) -> do
+    runDelays = takeDelayed >>= traverse_  (\(height, nodes) -> do
         traverse_ (propagateDelayed height) nodes  
         runDelays)
         
@@ -286,13 +326,27 @@ main = do
   
   (input1, fire1) <- newEventWithFire
   (input2, fire2) <- newEventWithFire 
-{-
   
-  let len   =  foldr1 (+) <$> merge [ (pure <$> input1) :: Event [Int], (pure <$> (+1) <$> input2), never]
-      test1  = merge [ pure <$> input2, pure <$> len ]
-      test  = merge [ test1, pure <$> input2 ]-}
   
-  handle <- subscribeEvent ((+3) <$> input1) 
-  x <- runFrame [fire2 4, fire1 4] handle
+  let out = mergeList [input1, input2, (+1) <$> input1, (+2) <$> input2]
+  
+  
+  handle <- subscribeEvent out
+  x <- runFrame [fire2 4, fire1 2] handle
   print (x :: Maybe [Int])
 
+
+  
+  
+-- From Reflex
+eventDMap :: [Event a] -> DMap (WrapArg Event (Const2 Int a))
+eventDMap es = DMap.fromDistinctAscList $ map (\(k, v) -> WrapArg (Const2 k) :=> v) $ zip [0 :: Int ..] es
+
+fromDMap :: DMap (Const2 Int a) -> [a]
+fromDMap = map (\(Const2 _ :=> v) -> v) . DMap.toList
+       
+mergeWith :: (a -> a -> a) -> [Event a] -> Event a
+mergeWith f es =  foldl1 f <$> mergeList es
+  
+mergeList ::  [Event a] -> Event [a]
+mergeList es = fromDMap <$> merge (eventDMap es) 
