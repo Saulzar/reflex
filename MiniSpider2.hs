@@ -37,26 +37,19 @@ import Data.Dependent.Map (DMap, GCompare)
 
 import Data.Dependent.Sum 
 
-
-
 import Data.Semigroup
 import qualified Data.List.NonEmpty as NE
 
-
-
-import Data.IntMap (IntMap)
-import qualified Data.IntMap as IntMap
-
-
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntMap.Strict as IntMap
 
 data SomeNode = forall a. SomeNode { unSome :: Node a }
 
--- data MakeNode a where
---  MakePush :: Node a -> (a -> EventM (Maybe b)) -> MakeNode b
---  MakeMerge :: GCompare k => DMap (WrapArg Event k) -> MakeNode (DMap k)
+data MakeNode a where
+  MakePush  :: NodeRef a -> (a -> EventM (Maybe b)) -> MakeNode b
+  MakeMerge :: GCompare k => [DSum (WrapArg NodeRef k)] -> MakeNode (DMap k)
+  MakeRoot  :: MakeNode a
 
-
-type MakeNode a = EventM (Node a)
 
 newtype NodeRef a = NodeRef { unRef :: IORef (Either (MakeNode a) (Node a)) }
 data Event a = Never | Event (NodeRef a)
@@ -65,28 +58,19 @@ newtype EventHandle a = EventHandle { unEventHandle :: Event a }
 
 type Height = Int
 
+data Subscription a b where
+  Push     :: Node a -> Node b -> (a -> EventM (Maybe b)) -> Subscription a b
+  Merge    :: GCompare k => Node a -> Node (DMap k) -> k a -> Subscription a (DMap k)
+  MergeMap :: Ord k => Node a -> Node (Map k a) -> k -> Subscription a (Map k a)
 
--- Data structure based Subscriber
-{-
-data Subscriber a where
-  Push     :: Node b -> (a -> EventM (Maybe b)) -> Subscriber a
-  Merge    ::  GCompare k => Node (DMap k) -> k a -> Subscriber a-}
-
-
-newtype Subscriber a = Subscriber (Height -> a -> EventM ())
-data NodeSub a = NodeSub !(Node a) !(Subscriber a)
-  
-data Parents a where
-  NoParent  :: Parents a
-  Parent    :: !(Node b) -> !(Subscriber b) -> Parents a
-  MapParent :: !(DMap (WrapArg NodeSub k)) -> Parents (DMap k)
-
+data Subscribing b = forall a. Subscribing (Subscription a b)
+data WeakSubscriber a = forall b. WeakSubscriber { unWeak :: Weak (Subscription a b) }
 
 
 data Node a = Node 
-  { nodeSubs      :: !(IORef [Weak (Subscriber a)])
+  { nodeSubs      :: !(IORef [WeakSubscriber a])
   , nodeHeight    :: !(IORef Int)  
-  , nodeParents   :: !(Parents a)
+  , nodeParents   :: ![Subscribing a]
   , nodeValue     :: !(IORef (Maybe a))
   }
 
@@ -110,26 +94,25 @@ instance MonadRef EventM where
   
   
 
-{-# NOINLINE unsafeCreateNode #-}
-unsafeCreateNode :: EventM (Node a) -> NodeRef a
+unsafeCreateNode :: MakeNode a -> NodeRef a
 unsafeCreateNode create = NodeRef $ unsafePerformIO $ newIORef (Left create) 
 
 
-createNode :: EventM (Node a) -> IO (NodeRef a)
-createNode create = NodeRef <$> newIORef (Left create) 
+makeNode :: MakeNode a -> IO (NodeRef a)
+makeNode create = NodeRef <$> newIORef (Left create) 
 
 
-unsafeCreateEvent :: EventM (Node a) -> Event a
+unsafeCreateEvent :: MakeNode a -> Event a
 unsafeCreateEvent = Event . unsafeCreateNode
 
 
-createEvent  :: EventM (Node a) -> IO (Event a)
-createEvent create = Event <$> createNode create
+createEvent  :: MakeNode a -> IO (Event a)
+createEvent create = Event <$> makeNode create
 
 readNodeRef :: NodeRef a -> EventM (Node a)
 readNodeRef (NodeRef ref) = readRef ref >>= \case
     Left create -> do
-      node <- create
+      node <- createNode create
       writeRef ref (Right node)
       return node
     Right node -> return node
@@ -147,18 +130,13 @@ readHeight node = readRef (nodeHeight node)
 weakPtr :: a -> EventM (Weak a)
 weakPtr a = liftIO (mkWeakPtr a Nothing)
 
--- weakPtr a = liftIO (mkWeakPtr a (Just (print "foo")))
-  
-  
-newNode :: Height -> Parents a -> EventM (Node a)
+newNode :: Height -> [Subscribing a] -> EventM (Node a)
 newNode height parents = 
   Node <$> newRef [] <*> newRef height <*> pure parents <*> newRef Nothing
-       
        
 
 readNode :: Node a -> EventM (Maybe a)
 readNode node = readRef (nodeValue node)
-
 
 
 writeNode :: Node a -> a -> EventM ()
@@ -171,22 +149,30 @@ readEvent :: EventHandle a -> EventM (Maybe a)
 readEvent (EventHandle e) = fmap join <$> traverse readNode =<< eventNode e
 
   
-subscribe :: Node a -> Subscriber a -> EventM ()
+subscribe :: Node a -> Subscription a b -> EventM ()
 subscribe node sub = do
-  weakNode <- weakPtr sub
-  modifyRef (nodeSubs node) (weakNode :)
+  weakSub <- weakPtr sub
+  modifyRef (nodeSubs node) (WeakSubscriber weakSub :)
+  
 
-pushSubscriber :: (a -> EventM (Maybe b)) -> Node b -> Subscriber a
-pushSubscriber f node = Subscriber $ \height -> 
-  f  >=> traverse_ (writePropagate height node)
+createNode :: MakeNode a -> EventM (Node a)
+createNode (MakePush ref f) = makePush ref f
+createNode (MakeMerge refs) = makeMerge refs 
+createNode MakeRoot = newNode 0 []
 
+  
 push :: (a -> EventM (Maybe b)) -> Event a -> Event b
 push f Never = Never
-push f (Event ref) =  unsafeCreateEvent $ do 
+push f (Event ref) = unsafeCreateEvent $ MakePush ref f
+
+
+makePush :: NodeRef a -> (a -> EventM (Maybe b)) -> EventM (Node b)
+makePush ref f =  do 
   parent <- readNodeRef ref
+  height <- readHeight parent
   rec
-    let sub = pushSubscriber f node
-    node <- join $ newNode <$> readHeight parent <*> pure (Parent parent sub)
+    let sub = Push parent node f
+    node <- newNode height [Subscribing sub]
   
   readNode parent >>= traverse (\a -> do
     f a >>= traverse (writeNode node))
@@ -194,39 +180,32 @@ push f (Event ref) =  unsafeCreateEvent $ do
   subscribe parent sub
   return node  
   
-  
-mergeSubscriber :: GCompare k => Node (DMap k) -> DSum (WrapArg Node k) -> DSum (WrapArg NodeSub k)
-mergeSubscriber node (WrapArg k :=> parent) = WrapArg k :=> NodeSub parent sub 
-  where 
-    sub = Subscriber $ \height value -> do
-      v <- readNode node
-      case v of
-        Nothing -> do
-          delay node =<< readHeight node
-          writeNode node (DMap.singleton k value)
-        Just m  -> writeRef (nodeValue node) $ Just (DMap.insert k value m)
-
-        
 
 merge :: GCompare k => DMap (WrapArg Event k) -> Event (DMap k)
-merge = merge' . catEvents . DMap.toAscList where
-  merge' []       = Never
-  merge' refs = unsafeCreateEvent $  do     
-    parents <- traverseDSums readNodeRef refs
-    height <- maximum <$> sequence (mapDSums readHeight parents) 
-    values <- catDSums <$> traverseDSums readNode parents
-    
-    rec
-      let subs = map (mergeSubscriber node) parents
-      node <- newNode (succ height) (MapParent $ fromAsc subs) 
-      
-    when (not  . null  $ values) $ writeNode node (fromAsc values)
-    
-    traverse_ subscribe' subs
-    return node
+merge events = case catEvents (DMap.toAscList events) of
+  [] -> Never
+  refs -> unsafeCreateEvent (MakeMerge refs) 
+
+
+mergeSubscribing :: GCompare k => Node (DMap k) -> DSum (WrapArg Node k) -> EventM (Subscribing (DMap k))  
+mergeSubscribing node (WrapArg k :=> parent) = do
+  subscribe parent sub
+  return (Subscribing sub)
   
-  subscribe' :: DSum (WrapArg NodeSub k) -> EventM () 
-  subscribe' (WrapArg k :=> NodeSub parent sub) = subscribe parent sub 
+  where sub = Merge parent node k
+
+  
+makeMerge :: GCompare k => [DSum (WrapArg NodeRef k)] -> EventM (Node (DMap k))
+makeMerge refs = do     
+  parents <- traverseDSums readNodeRef refs
+  height <- maximum <$> sequence (mapDSums readHeight parents) 
+  values <- catDSums <$> traverseDSums readNode parents
+  rec
+    subs <- traverse (mergeSubscribing node) parents
+    node <- newNode (succ height) subs 
+    
+  when (not  . null  $ values) $ writeNode node (fromAsc values)
+  return node
   
   
 never :: Event a
@@ -235,7 +214,7 @@ never = Never
 
 newEventWithFire :: IO (Event a, a -> Trigger)
 newEventWithFire = do
-  root <- createNode $ newNode 0 NoParent
+  root <- makeNode MakeRoot
   return (Event root, Trigger root)
   
 
@@ -249,9 +228,9 @@ clearNode :: SomeNode -> IO ()
 clearNode (SomeNode node) = writeRef (nodeValue node) Nothing
     
 
-traverseWeak :: (a -> EventM ()) -> [Weak a] -> EventM [Weak a]
+traverseWeak :: (forall b. Subscription a b -> EventM ()) -> [WeakSubscriber a] -> EventM [WeakSubscriber a]
 traverseWeak f subs = do
-  flip filterM subs $ \weak -> do 
+  flip filterM subs $ \(WeakSubscriber weak) -> do 
     m <- liftIO (deRefWeak weak)
     isJust m <$ traverse_ f m 
 
@@ -271,11 +250,24 @@ writePropagate ::  Height -> Node a -> a -> EventM ()
 writePropagate  height node value = do
   writeNode node value
   propagate height node value
-   
+  
+
     
-propagate ::  Height -> Node a -> a -> EventM () 
-propagate  height node value = modifyM  (nodeSubs node) $ 
-  traverseWeak (\(Subscriber prop) -> prop height value)
+propagate :: forall a. Height -> Node a -> a -> EventM () 
+propagate  height node value = modifyM  (nodeSubs node) $ traverseWeak propagate' where
+  
+  propagate' :: Subscription a b -> EventM ()
+  propagate' (Push _ dest f)  = 
+    f value >>= traverse_ (writePropagate height dest)
+
+  propagate' (Merge _ dest k) = do
+    v <- readNode dest
+    case v of
+      Nothing -> do
+        delay dest =<< readHeight dest
+        writeNode dest (DMap.singleton k value)
+      Just m  -> writeRef (nodeValue dest) $ Just (DMap.insert k value m)
+  
 
 
 propagateDelayed :: Height -> SomeNode -> EventM ()
@@ -340,7 +332,7 @@ mergeTree n es | length es <= n = mergeWith (+) es
                | otherwise = mergeTree n subTrees
   where
     merges = chunksOf n es
-    subTrees = map (id <$> id <$> mergeWith (+)) merges
+    subTrees = map (mergeWith (+)) merges
   
 
 makeTree size branching = do
@@ -374,20 +366,18 @@ main = defaultMain
     branching = 4
   
 -- main = do
---   mergeFiring 4 4
-  
-  
+
 --   (input1, fire1) <- newEventWithFire
 --   (input2, fire2) <- newEventWithFire 
 --   
 --   let out = mergeList [input1, input2, (+1) <$> input1, (+2) <$> input2]
 --   
---   handle <- subscribeEvent out
+--   handle <- subscribeEvent (out)
 --   x <- runFrame [fire1 (3::Int)] handle
 --   print x
+--   
   
-  
---   let size = 2000
+--   let size = 200
 --   (e, fires) <- makeTree size 2
 --   
 --   handle <- subscribeEvent e
@@ -395,9 +385,9 @@ main = defaultMain
 --   print =<< runFrame (zipWith ($) fires [1..]) handle
 --   print =<< runFrame (zipWith ($) fires [1..]) handle
 --   print =<< runFrame (zipWith ($) fires [1..]) handle
-
-  
---   print (x :: Maybe Int)
+-- 
+--   
+-- --   print (x :: Maybe Int)
 --   print (sum [1..size])
 
 
@@ -405,7 +395,7 @@ main = defaultMain
   
 -- From Reflex
 eventDMap :: [Event a] -> DMap (WrapArg Event (Const2 Int a))
-eventDMap es = DMap.fromDistinctAscList $ map (\(k, v) -> WrapArg (Const2 k) :=> v) $ zip [0 :: Int ..] es
+eventDMap es = fromAsc $ map (\(k, v) -> WrapArg (Const2 k) :=> v) $ zip [0 :: Int ..] es
 
 fromDMap :: DMap (Const2 Int a) -> [a]
 fromDMap = map (\(Const2 _ :=> v) -> v) . DMap.toList
