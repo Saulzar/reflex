@@ -10,6 +10,7 @@ import Control.Monad.Trans.Except (ExceptT())
 import Control.Monad.Trans.Cont (ContT())
 import Control.Monad.Trans.RWS (RWST())
 import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.List.NonEmpty as NE
 import Data.These
 import Data.Align
 import Data.GADT.Compare (GEq (..), (:~:) (..))
@@ -316,7 +317,7 @@ instance (Semigroup a, Reflex t) => Monoid (Event t a) where
 -- in the list occurs. If multiple occur at the same time they are
 -- folded from the left with the given function.
 mergeWith :: Reflex t => (a -> a -> a) -> [Event t a] -> Event t a
-mergeWith f es = fmap (Prelude.foldl1 f . map (\(Const2 _ :=> v) -> v) . DMap.toList) $ merge $ DMap.fromList $ map (\(k, v) -> WrapArg (Const2 k) :=> v) $ zip [0 :: Int ..] es
+mergeWith f es =  foldl1 f <$> mergeList es
 
 -- | Create a new 'Event' that occurs if at least one of the 'Event's
 -- in the list occurs. If multiple occur at the same time the value is
@@ -326,10 +327,15 @@ leftmost = mergeWith const
 
 -- | Create a new 'Event' that occurs if at least one of the 'Event's
 -- in the list occurs and has a list of the values of all 'Event's
--- occuring at that time.
+-- occuring at that time.       
 mergeList :: Reflex t => [Event t a] -> Event t (NonEmpty a)
-mergeList [] = never
-mergeList es = mergeWith (<>) $ map (fmap (:|[])) es
+mergeList es = fromDMap <$> merge (eventDMap es) where
+  
+  eventDMap :: [Event t a] -> DMap (WrapArg (Event t) (Const2 Int a))
+  eventDMap es = DMap.fromDistinctAscList (map (\(k, v) -> WrapArg (Const2 k) :=> v) (zip [0 :: Int ..] es))
+  
+  fromDMap :: DMap (Const2 Int a) -> NonEmpty a
+  fromDMap = NE.fromList . map (\(Const2 _ :=> v) -> v) . DMap.toList
 
 -- | Create a new 'Event' combining the map of 'Event's into an
 -- 'Event' that occurs if at least one of them occurs and has a map of
