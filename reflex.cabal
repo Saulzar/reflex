@@ -66,8 +66,8 @@ test-suite cross-impl
 benchmark spider-bench
   type: exitcode-stdio-1.0
   hs-source-dirs: bench
-  main-is: Main.hs
-  ghc-options: -O2 -rtsopts
+  main-is: Mini.hs
+  ghc-options: -O2 
   build-depends:
     base,
     dependent-sum,
@@ -78,7 +78,8 @@ benchmark spider-bench
     mtl,
     primitive,
     criterion == 1.1.*,
-    reflex
+    reflex,
+    split
 
 source-repository head
   type: git

@@ -9,6 +9,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE ConstraintKinds #-}
 
 module Reflex.MiniSpider where
 
@@ -198,7 +199,9 @@ createEvent  :: MakeNode a -> IO (Event a)
 createEvent create = Event <$> makeNode create
 
 
-readLazy :: (MonadRef m, Ref m ~ IORef) => (a -> m b) -> LazyRef a b -> m b
+type MonadIORef m = (MonadIO m, MonadRef m, Ref m ~ IORef)
+
+readLazy :: MonadIORef m => (a -> m b) -> LazyRef a b -> m b
 readLazy create ref = readRef ref >>= \case
     Left init -> do
       node <- create init
@@ -215,7 +218,7 @@ eventNode Never       = return Nothing
 eventNode (Event ref) = Just <$> readNodeRef ref
 
   
-readHeight :: Node a -> EventM Int
+readHeight :: MonadIORef m => Node a -> m Int
 readHeight node = readRef (nodeHeight node)
 
 
@@ -435,13 +438,13 @@ data Trigger where
 
     
 
-traverseWeak :: (forall b. Subscription a b -> EventM ()) -> [WeakSubscriber a] -> EventM [WeakSubscriber a]
+traverseWeak :: MonadIORef m => (forall b. Subscription a b -> m ()) -> [WeakSubscriber a] -> m [WeakSubscriber a]
 traverseWeak f subs = do
   flip filterM subs $ \(WeakSubscriber weak) -> do 
     m <- liftIO (deRefWeak weak)
     isJust m <$ traverse_ f m 
 
-traverseSubs :: (forall b. Subscription a b -> EventM ()) -> Node a -> EventM ()
+traverseSubs :: MonadIORef m =>  (forall b. Subscription a b -> m ()) -> Node a -> m ()
 traverseSubs f node = modifyM  (nodeSubs node) $ traverseWeak f
 
 modifyM :: MonadRef m => Ref m a -> (a -> m a) -> m ()
@@ -533,10 +536,8 @@ invalidate = traverse_ (liftIO . deRefWeak >=> traverse_ invalidate') where
 
   invalidate' (SwitchInv s) = modify (Connect s:)
 
-  
-  
-{-
-invalidateHeight :: Node a ->  EventM ()
+
+invalidateHeight :: Node a ->  IO ()
 invalidateHeight node  = do
   height <- readHeight node
   when (height /= invalid) $ do
@@ -544,15 +545,16 @@ invalidateHeight node  = do
     traverseSubs invalidateSub node
    
     where
-      invalidateSub sub = traverse_ (invalidateHeight . fmap snd . dest) -}
+      invalidateSub :: Subscription a b -> IO ()
+      invalidateSub sub = traverse_ invalidateHeight (snd <$> dest sub)
 
       
 -- | Give the destination of a subscription, and difference in height
-dest :: Subscription a b -> Maybe (Height, Node b)
-dest (MergeSub _ node _ _) = Just (1, node)
-dest (PushSub  _ node _)   = Just (0, node)
-dest (SwitchSub s)         = Just (0, switchNode s)
-dest HoldSub {}            = Nothing
+dest :: Subscription a b -> [(Height, Node b)]
+dest (MergeSub _ node _ _) = [(1, node)]
+dest (PushSub  _ node _)   = [(0, node)]
+dest (SwitchSub s)         = [(0, switchNode s)]
+dest HoldSub {}            = []
    
    
 runEventM :: EventM a -> IO a
@@ -586,7 +588,7 @@ endFrame readEvents = do
   liftIO . traverse_ clearNode =<< askRef envClears 
   connects <- liftIO . writeHolds =<< askRef  envHolds
   
-  connectSwitches connects
+--   connectSwitches connects
   return a
   
   where
