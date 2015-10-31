@@ -37,6 +37,7 @@ library
     Reflex,
     Reflex.Spider,
     Reflex.Spider.Internal,
+    Reflex.MiniSpider,
     Reflex.Class,
     Reflex.Dynamic,
     Reflex.Dynamic.TH,
