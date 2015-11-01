@@ -17,23 +17,17 @@ module Reflex.MiniSpider where
 
 import Data.IORef
 import System.Mem.Weak
-import System.Mem
 
 import System.IO.Unsafe
 import Control.Monad.Ref
 import Control.Monad.Reader
 import Control.Monad.State.Strict
 
-import Control.Monad.IO.Class
 import Control.Monad.Primitive
 
 
 import Data.Foldable
-import Data.Traversable
-import Data.Functor
 import Data.Maybe
-import Data.List
-import Data.Void
 
 import Data.Functor.Misc
 
@@ -55,9 +49,9 @@ data SomeNode = forall a. SomeNode { unSome :: Node a }
 
 
 data MakeNode a where
-  MakeNode  :: NodeRef a -> (a -> EventM (Maybe b)) -> MakeNode b
-  MakeMerge :: GCompare k => [DSum (WrapArg NodeRef k)] -> MakeNode (DMap k)
-  MakeSwitch :: Behavior (Event a) -> MakeNode a
+  MakeNode  :: !(NodeRef a) -> !(a -> EventM (Maybe b)) -> MakeNode b
+  MakeMerge :: GCompare k => !([DSum (WrapArg NodeRef k)]) -> MakeNode (DMap k)
+  MakeSwitch :: !(Behavior (Event a)) -> MakeNode a
   MakeRoot  :: MakeNode a
 
  
@@ -72,9 +66,9 @@ data Event a
 type PullRef a = LazyRef (BehaviorM a) (Pull a)
     
 data Behavior a 
-    = Constant a 
-    | PullB (PullRef a)
-    | HoldB (Hold a)
+    = Constant !a 
+    | PullB !(PullRef a)
+    | HoldB !(Hold a)
 
 
 newtype EventHandle a = EventHandle { unEventHandle :: Event a }
@@ -83,7 +77,7 @@ type Height = Int
 
 data Subscription a b where
   PushSub     :: Node a -> Node b -> (a -> EventM (Maybe b)) -> Subscription a b
-  MergeSub    :: GCompare k => Node a -> Node (DMap k) -> IORef (DMap k) -> k a -> Subscription a (DMap k)
+  MergeSub    :: GCompare k => Node a -> Merge k -> k a -> Subscription a (DMap k)
   HoldSub     :: Node a -> Hold a -> Subscription a a
   SwitchSub   :: Switch a -> Subscription a a
 
@@ -94,15 +88,19 @@ instance Show (Subscription a b) where
   show (SwitchSub {}) = "Hold"
 
 
+data Subscribing b where 
+  Subscribing       :: (Subscription a b) -> Subscribing b
+  SubscribingMerge  :: (Merge k) -> Subscribing (DMap k) 
+  SubscribingSwitch :: (Switch a) -> Subscribing a
+  SubscribingRoot   :: Subscribing b
 
-data Subscribing b = forall a. Subscribing { unSubscribing :: !(Subscription a b) }
 data WeakSubscriber a = forall b. WeakSubscriber { unWeak :: !(Weak (Subscription a b)) }
 
 
 data Node a = Node 
   { nodeSubs      :: !(IORef [WeakSubscriber a])
   , nodeHeight    :: !(IORef Int)  
-  , nodeParents   :: [Subscribing a]
+  , nodeParents   :: (Subscribing a)
   , nodeValue     :: !(IORef (Maybe a))
   }
 
@@ -113,7 +111,7 @@ data Invalidator where
 
   
 data Pull a  = Pull 
-  { pullInv   :: !Invalidator 
+  { pullInv   :: Invalidator 
   , pullInvs  :: !(IORef [Weak Invalidator]) 
   , pullValue :: !(IORef (Maybe a)) 
   , pullCompute :: (BehaviorM a)
@@ -135,18 +133,29 @@ data Switch a = Switch
   , switchSource :: Behavior (Event a)
   }
   
+  
+data MergeSub' k a where
+  MergeSub'      :: (Subscription a (DMap k)) -> MergeSub' k a  
 
+data Merge k = Merge 
+  { mergeNode     :: Node (DMap k)
+  , mergeParents  :: DMap (WrapArg (MergeSub' k) k)
+  , mergePartial  :: !(IORef (DMap k))
+  , mergeInvalid  :: !(IORef (DMap (WrapArg Node k)))
+  }
+  
+  
 data WriteHold where 
-  WriteHold :: Hold a -> a -> WriteHold
+  WriteHold :: !(Hold a) -> !a -> WriteHold
   
 data HoldInit where
-  HoldInit :: Hold a -> HoldInit
+  HoldInit :: !(Hold a) -> HoldInit
   
 data Connect where
-  Connect :: Switch a -> Connect
+  Connect :: !(Switch a) -> Connect
   
 data DelayMerge where
-  DelayMerge :: Node (DMap k) -> IORef (DMap k) -> DelayMerge
+  DelayMerge :: !(Merge k) -> DelayMerge
   
 
 data Env = Env 
@@ -203,8 +212,8 @@ type MonadIORef m = (MonadIO m, MonadRef m, Ref m ~ IORef)
 
 readLazy :: MonadIORef m => (a -> m b) -> LazyRef a b -> m b
 readLazy create ref = readRef ref >>= \case
-    Left init -> do
-      node <- create init
+    Left a -> do
+      node <- create a
       writeRef ref (Right node)
       return node
     Right node -> return node
@@ -223,7 +232,7 @@ readHeight node = readRef (nodeHeight node)
 
 
 
-newNode :: Height -> [Subscribing a] -> EventM (Node a)
+newNode :: Height -> Subscribing a -> EventM (Node a)
 newNode height parents = 
   Node <$> newRef [] <*> newRef height <*> pure parents <*> newRef Nothing
     
@@ -248,12 +257,14 @@ subscribe node sub = do
   modifyRef (nodeSubs node) (WeakSubscriber weakSub :)
   return weakSub
   
+subscribe_ :: Node a -> Subscription a b -> EventM () 
+subscribe_ node = void . subscribe node
 
 createNode :: MakeNode a -> EventM (Node a)
 createNode (MakeNode ref f) = makePush ref f
 createNode (MakeMerge refs) = makeMerge refs 
 createNode (MakeSwitch b) = makeSwitch b 
-createNode MakeRoot = newNode 0 []
+createNode MakeRoot = newNode 0 SubscribingRoot
 
 constant :: a -> Behavior a
 constant = Constant
@@ -273,7 +284,7 @@ initHold (HoldInit h) = void $ readLazy createHold (holdSub h) where
     traverse_ (delayHold h) value
     
     let sub = HoldSub parent h
-    subscribe parent sub
+    subscribe_ parent sub
     
     return (Just sub)
     
@@ -335,7 +346,7 @@ makeSwitch source =  do
     let s   = Switch sub connRef node inv source
         inv = SwitchInv s
         sub = SwitchSub s
-    node <- newNode 0 [Subscribing sub]
+    node <- newNode 0 (SubscribingSwitch s)
   
   writeRef (nodeHeight node)  =<< connect s
   return node  
@@ -353,25 +364,43 @@ connect (Switch sub connRef node inv source) = do
       readNode parent >>= traverse_ (writeNode node)  
       readHeight parent
     
+    
+whenM :: Applicative m => Bool -> m b -> m (Maybe b)    
+whenM True  m  = Just <$> m
+whenM False _  = pure Nothing
 
-reconnect :: Connect -> EventM (SomeNode, Height)
+bool :: Bool -> a -> Maybe a
+bool True  a  = Just a
+bool False b  = Nothing
+
+
+reconnect :: Connect -> EventM (Maybe (SomeNode, Height))
 reconnect (Connect s) = do
   -- Forcibly disconnect any existing connection
   conn <- readRef (switchConn s)
   liftIO (traverse_ (finalize . snd) conn)
-  (SomeNode (switchNode s), ) <$> connect s
   
+  new <- connect s
+  liftIO $ do
+    old <- readHeight node
+    whenM (new /= old) $ do
+      invalidateHeight node
+      return (SomeNode node, new)
+    
+    where
+      node = switchNode s
+    
 
 connectSwitches :: [Connect] -> EventM ()
 connectSwitches connects = do
-  traverse reconnect connects 
-    
-  return ()
-
+  recomputes <- traverse reconnect connects 
+  liftIO $ for_ (catMaybes recomputes) $ \(SomeNode n, height) ->
+    propagateHeight n height
+  
   
 
 push :: (a -> EventM (Maybe b)) -> Event a -> Event b
-push f Never = Never
+push _ Never = Never
 push f (Event ref) = unsafeCreateEvent $ MakeNode ref f
 
 pushAlways :: (a -> EventM b) -> Event a -> Event b
@@ -384,12 +413,12 @@ makePush ref f =  do
   height <- readHeight parent
   rec
     let sub = PushSub parent node f
-    node <- newNode height [Subscribing sub]
+    node <- newNode height (Subscribing sub)
   
   readNode parent >>= traverse_ 
     (f >=> traverse_ (writeNode node))
   
-  subscribe parent sub
+  subscribe_ parent sub
   return node  
   
 
@@ -399,12 +428,12 @@ merge events = case catEvents (DMap.toAscList events) of
   refs -> unsafeCreateEvent (MakeMerge refs) 
 
 
-mergeSubscribing :: GCompare k => Node (DMap k) -> IORef (DMap k) -> DSum (WrapArg Node k) -> EventM (Subscribing (DMap k))  
-mergeSubscribing node partial (WrapArg k :=> parent) = do
-  subscribe parent sub
-  return (Subscribing sub)
+mergeSubscribing :: GCompare k =>  Merge k -> DSum (WrapArg Node k) -> EventM (DSum (WrapArg (MergeSub' k) k))  
+mergeSubscribing  merge' (WrapArg k :=> parent) = do
+  subscribe_ parent sub
+  return (WrapArg k :=> MergeSub' sub)
   
-  where sub = MergeSub parent node partial k
+  where sub = MergeSub parent merge' k
 
   
 makeMerge :: GCompare k => [DSum (WrapArg NodeRef k)] -> EventM (Node (DMap k))
@@ -412,11 +441,11 @@ makeMerge refs = do
   parents <- traverseDSums readNodeRef refs
   height <- maximum <$> sequence (mapDSums readHeight parents) 
   values <- catDSums <$> traverseDSums readNode parents
-  partial <- newRef DMap.empty
   
   rec
-    subs <- traverse (mergeSubscribing node partial) parents
-    node <- newNode (succ height) subs 
+    subs <- traverse (mergeSubscribing merge') parents
+    merge' <- Merge node (fromAsc subs) <$> newRef DMap.empty <*> newRef DMap.empty
+    node <- newNode (succ height) (SubscribingMerge merge') 
     
   when (not  . null  $ values) $ writeNode node (fromAsc values)
   return node
@@ -445,19 +474,24 @@ traverseWeak f subs = do
     isJust m <$ traverse_ f m 
 
 traverseSubs :: MonadIORef m =>  (forall b. Subscription a b -> m ()) -> Node a -> m ()
-traverseSubs f node = modifyM  (nodeSubs node) $ traverseWeak f
+traverseSubs f node = modifyM (nodeSubs node) $ traverseWeak f
 
+
+forSubs :: MonadIORef m =>  Node a -> (forall b. Subscription a b -> m ()) -> m ()
+forSubs node f = traverseSubs f node
+
+
+    
 modifyM :: MonadRef m => Ref m a -> (a -> m a) -> m ()
 modifyM ref f = readRef ref >>= f >>= writeRef ref
-    
-    
+
     
 -- | Delayed operations    
-delayMerge :: Node (DMap k) -> IORef (DMap k) -> Height ->  EventM ()    
-delayMerge node valueRef height = do
+delayMerge :: Merge k -> Height ->  EventM ()    
+delayMerge m height = do
   delayRef <- asks envDelays
-  modifyRef delayRef insert
-    where insert = IntMap.insertWith (<>) height [DelayMerge node valueRef]
+  modifyRef delayRef ins
+    where ins = IntMap.insertWith (<>) height [DelayMerge m]
           
           
 delayHold :: Hold a -> a -> EventM ()
@@ -487,10 +521,10 @@ propagate  height node value = traverseSubs propagate' node where
   propagate' (PushSub _ dest f)  = 
     f value >>= traverse_ (writePropagate height dest)
 
-  propagate' (MergeSub _ dest partial k) = do
-    m <- readRef partial
-    writeRef partial $ DMap.insert k value m
-    when (DMap.null m) $ delayMerge dest partial =<< readHeight dest
+  propagate' (MergeSub _ m k) = do
+    partial <- readRef (mergePartial m)
+    writeRef (mergePartial m) $ DMap.insert k value partial
+    when (DMap.null partial) $ delayMerge m =<< readHeight (mergeNode m)
       
   propagate' (HoldSub _ h) =  delayHold h value
   
@@ -498,10 +532,10 @@ propagate  height node value = traverseSubs propagate' node where
 
   
 propagateMerge :: Height -> DelayMerge -> EventM ()
-propagateMerge height (DelayMerge node valueRef) = do
-  value <- readRef valueRef
-  writeRef valueRef (DMap.empty)
-  writePropagate height node value
+propagateMerge height (DelayMerge m) = do
+  value <- readRef (mergePartial m)
+  writeRef (mergePartial m) (DMap.empty)
+  writePropagate height (mergeNode m) value
   
 
   
@@ -524,7 +558,6 @@ writeHolds writes = execStateT (traverse_ writeHold writes) []
 writeHold :: WriteHold -> InvalidateM ()
 writeHold (WriteHold h value) = do
   writeRef (holdValue h) value  
-  invs <- readRef (holdInvs h)
   readClear (holdInvs h) >>= invalidate
 
   
@@ -537,24 +570,43 @@ invalidate = traverse_ (liftIO . deRefWeak >=> traverse_ invalidate') where
   invalidate' (SwitchInv s) = modify (Connect s:)
 
 
+  
+-- | Recompute heights from switch connects in two stages 
+-- to save computing the same heights repeatedly
 invalidateHeight :: Node a ->  IO ()
 invalidateHeight node  = do
   height <- readHeight node
   when (height /= invalid) $ do
     writeRef (nodeHeight node) invalid
-    traverseSubs invalidateSub node
+    
+    forSubs node $ \case 
+      MergeSub _ (Merge dest _ _ invalids)  k -> do
+        height' <- readHeight dest
+        when (height' <= height + 1) $ do
+          modifyRef invalids (DMap.insert (WrapArg k) node)
+          invalidateHeight dest
+        
+      PushSub  _ node _   -> invalidateHeight node
+      SwitchSub s         -> invalidateHeight (switchNode s)
+      HoldSub {}          -> return ()  
    
-    where
-      invalidateSub :: Subscription a b -> IO ()
-      invalidateSub sub = traverse_ invalidateHeight (snd <$> dest sub)
 
+propagateHeight ::  Node a -> Height ->  IO ()
+propagateHeight node height = undefined
       
--- | Give the destination of a subscription, and difference in height
-dest :: Subscription a b -> [(Height, Node b)]
-dest (MergeSub _ node _ _) = [(1, node)]
-dest (PushSub  _ node _)   = [(0, node)]
-dest (SwitchSub s)         = [(0, switchNode s)]
-dest HoldSub {}            = []
+{--- | Give the destination of a subscription which is (potentially) 
+-- influences it's height.
+affectsHeight :: Height -> Subscription a b -> IO (Maybe (Node b))
+affectsHeight h sub = join <$> traverse (dest sub) $ \(d, node) -> do
+  h' <- readHeight node
+  bool (h' + d == h) node
+  
+   
+dest :: Subscription a b -> Maybe (Height, Node b)
+dest (MergeSub _ m _) = Just (1, mergeNode m)
+dest (PushSub  _ node _)   = Just (0, node)
+dest (SwitchSub s)         = Just (0, switchNode s)
+dest HoldSub {}            = Nothing  -} 
    
    
 runEventM :: EventM a -> IO a
@@ -573,9 +625,9 @@ runHostFrame action = runEventM $ do
 -- any other new holds to be initialized.
 initHolds :: EventM ()
 initHolds = do
-  inits <- readClear =<< asks envHoldInits  
-  unless (null inits) $ do
-    traverse_ initHold inits
+  newHolds <- readClear =<< asks envHoldInits  
+  unless (null newHolds) $ do
+    traverse_ initHold newHolds
     initHolds
   
 
@@ -588,7 +640,7 @@ endFrame readEvents = do
   liftIO . traverse_ clearNode =<< askRef envClears 
   connects <- liftIO . writeHolds =<< askRef  envHolds
   
---   connectSwitches connects
+  connectSwitches connects
   return a
   
   where
@@ -616,7 +668,7 @@ takeDelayed = do
 fireEventsAndRead :: [Trigger] -> EventM a -> IO a
 fireEventsAndRead triggers runRead = runEventM $ do
 
-  roots <- traverse propagateRoot triggers
+  traverse_ propagateRoot triggers
   runDelays
   endFrame runRead
 
@@ -786,14 +838,14 @@ traverseDSums :: Applicative m => (forall a. f a -> m (g a)) -> [DSum (WrapArg f
 traverseDSums f = traverse (\(WrapArg k :=> v) -> (WrapArg k :=>) <$> f v)
   
 mapDSums :: (forall a. f a -> b) -> [DSum (WrapArg f k)] -> [b]
-mapDSums f = map (\(WrapArg k :=> v) -> f v)
+mapDSums f = map (\(WrapArg _ :=> v) -> f v)
 
 catDSums :: [DSum (WrapArg Maybe k)] -> [DSum k]
 catDSums = catMaybes . map toMaybe
   
 toMaybe :: DSum (WrapArg Maybe k)  -> Maybe (DSum k)
 toMaybe (WrapArg k :=> Just v ) = Just (k :=> v)
-toMaybe (WrapArg k :=> Nothing) = Nothing
+toMaybe _ = Nothing
 
 fromAsc :: [DSum k] -> DMap k
 fromAsc = DMap.fromDistinctAscList
