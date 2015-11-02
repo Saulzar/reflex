@@ -74,14 +74,10 @@ testSpider builder (bMap, eMap) = unsafePerformIO $ S.runSpiderHost $ do
     forM_ (Map.lookup t bMap) $ \val -> mapM_ (\ rbt -> fireEvents [rbt :=> val]) =<< readRef rbTrigger
     bOutput <- sample b'
     eOutput <- liftM join $ forM (Map.lookup t eMap) $ \val -> do
-      mret <- readRef reTrigger
-      let firing = case mret of
-            Just ret -> [ret :=> val]
-            Nothing -> []
-      fireEventsAndRead firing $ sequence =<< readEvent e'Handle
+      fireEventRefAndRead reTrigger val e'Handle
     liftIO performGC
     return (t, (bOutput, eOutput))
-  return (Map.fromList $ map (second fst) outputs, Map.mapMaybe id $ Map.fromList $ map (second snd) outputs) 
+  return (Map.fromList $ map (second fst) outputs, Map.mapMaybe id $ Map.fromList $ map (second snd) outputs)
 
 tracePerf :: Show a => a -> b -> b
 tracePerf = flip const

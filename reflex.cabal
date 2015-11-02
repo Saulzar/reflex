@@ -45,7 +45,7 @@ library
     Data.Functor.Misc
 
   other-extensions: TemplateHaskell
-  ghc-options: -Wall -fwarn-tabs -funbox-strict-fields -O2
+  ghc-options: -Wall -fwarn-tabs  -O2
 
 test-suite cross-impl
   type: exitcode-stdio-1.0
