@@ -171,7 +171,7 @@ data DelayMerge where
   DelayMerge :: !(Merge k) -> DelayMerge
 
 data CoincidenceOcc where
-  CoincidenceOcc :: Coincidence a -> NodeSub a ->  CoincidenceOcc
+  CoincidenceOcc :: NodeSub a ->  CoincidenceOcc
 
 data Env = Env
   { envDelays :: !(IORef (IntMap [DelayMerge]))
@@ -375,7 +375,7 @@ makeCoincidence ref = do
 
 connectC :: Coincidence a -> Event a -> EventM (Maybe a)
 connectC _ Never = return Nothing
-connectC c@(Coincidence node parent _ innerSub) (Event ref) = do
+connectC (Coincidence node parent _ innerSub) (Event ref) = do
   inner <- readNodeRef ref
   innerHeight <- readHeight inner
   height <- readHeight parent
@@ -389,7 +389,7 @@ connectC c@(Coincidence node parent _ innerSub) (Event ref) = do
     -- and adjust our height
     Nothing -> when (innerHeight >= height) $ do
       weakSub <- subscribe inner innerSub
-      askModifyRef envCoincidences (CoincidenceOcc c (inner, weakSub):)
+      askModifyRef envCoincidences (CoincidenceOcc (inner, weakSub):)
       liftIO $ propagateHeight innerHeight node
   return value
 
@@ -435,39 +435,24 @@ bool True  a  = Just a
 bool False _  = Nothing
 
 
-reconnect :: Connect -> IO (Maybe (SomeNode, Height))
+reconnect :: Connect -> IO ()
 reconnect (Connect s) = do
   -- Forcibly disconnect any existing connection
   conn <- readRef (switchConn s)
   traverse_ (finalize . snd) conn
 
-  new <- evalEventM $ connect s
-  old <- readHeight node
-  boolM (new /= old) $ do
-    invalidateHeight new node
-    return (SomeNode node, new)
-
-    where
-      node = switchNode s
+  height <- evalEventM $ connect s
+  propagateHeight height (switchNode s)
 
 
-disconnectC :: CoincidenceOcc -> IO (Maybe (SomeNode, Height))
-disconnectC (CoincidenceOcc (Coincidence node parent _ _) (_, weakSub)) = do
-  finalize weakSub
-  outerHeight <- readHeight parent
-  currentHeight <- readHeight node
-  -- Reset height of the coincidence node back to the outer height
-  boolM (outerHeight /= currentHeight) $ do
-    invalidateHeight outerHeight node
-    return (SomeNode node, outerHeight)
 
+disconnectC :: CoincidenceOcc -> IO ()
+disconnectC (CoincidenceOcc (_, weakSub)) = finalize weakSub
 
 connectSwitches :: [Connect] -> [CoincidenceOcc] -> IO ()
 connectSwitches connects coincidences = do
-  resets <- traverse disconnectC coincidences
-  recomputes <- traverse reconnect connects
-  for_ (catMaybes (resets <> recomputes)) $ \(SomeNode n, height) ->
-    recomputeInvalid height n
+  traverse_ disconnectC coincidences
+  traverse_ reconnect connects
 
 
 
@@ -645,36 +630,9 @@ invalidate = traverse_ (liftIO . deRefWeak >=> traverse_ invalidate') where
   invalidate' (SwitchInv s) = modify (Connect s:)
 
 
--- | Recompute heights from switch connects in two stages
--- to save computing the same heights repeatedly
-invalidateHeight :: Height -> Node a ->  IO ()
-invalidateHeight newHeight node  = do
-  height <- readHeight node
-  when (height /= Invalid) $ do
-    writeRef (nodeHeight node) Invalid
 
-    forSubs node $ \case
-      MergeSub (Merge dest _ _)  _ -> do
-        height' <- readHeight dest
-        when (height' == height + 1 || height' < newHeight + 1) $ do
-          invalidateHeight (newHeight + 1) dest
-      sub -> traverseDest (invalidateHeight newHeight) sub
-
-
-recomputeInvalid :: Height -> Node a -> IO ()
-recomputeInvalid newHeight node = do
-  height <- readHeight node
-  when (height == Invalid) $ do
-    writeRef (nodeHeight node) newHeight
-    forSubs node $ \case
-      MergeSub (Merge dest parents _)  _ -> do
-        mergeHeight <- maximumHeight <$> sequence (mapDMap (\(MergeParent p _) -> readHeight p) parents)
-        when (isValid mergeHeight) $ recomputeInvalid (succ mergeHeight) dest
-      sub -> traverseDest (recomputeInvalid newHeight) sub
-
--- | Propagate changes in height from a coincidence, these are always
--- new subscribers, so any change in height is always an increase
--- (no need to re-compute all the heights for a merge)
+-- | Propagate changes in height from a coincidence or switch
+-- assumes height as maximum over time
 propagateHeight :: Height -> Node a -> IO ()
 propagateHeight newHeight node = do
   height <- readHeight node
