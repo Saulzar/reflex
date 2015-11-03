@@ -208,8 +208,10 @@ createEvent  :: MakeNode a -> IO (Event a)
 createEvent create = Event <$> makeNode create
 
 
+
 type MonadIORef m = (MonadIO m, MonadRef m, Ref m ~ IORef)
 
+{-# SPECIALIZE readLazy :: (a -> IO b) -> LazyRef a b -> IO b #-}
 readLazy :: MonadIORef m => (a -> m b) -> LazyRef a b -> m b
 readLazy create ref = readRef ref >>= \case
     Left a -> do
@@ -231,9 +233,8 @@ readHeight :: MonadIORef m => Node a -> m Int
 readHeight node = readRef (nodeHeight node)
 
 
-
-newNode :: Height -> Subscribing a -> EventM (Node a)
-newNode height parents =
+newNode :: MonadIO m => Height -> Subscribing a -> m (Node a)
+newNode height parents = liftIO $
   Node <$> newRef [] <*> newRef height <*> pure parents <*> newRef Nothing
 
 
@@ -251,13 +252,13 @@ readEvent :: EventHandle a -> EventM (Maybe a)
 readEvent (EventHandle e) = fmap join <$> traverse readNode =<< eventNode e
 
 
-subscribe :: Node a -> Subscription a b -> EventM (Weak (Subscription a b))
+subscribe :: MonadIORef m => Node a -> Subscription a b -> m (Weak (Subscription a b))
 subscribe node sub = do
   weakSub <- liftIO (mkWeakPtr sub Nothing)
   modifyRef (nodeSubs node) (WeakSubscriber weakSub :)
   return weakSub
 
-subscribe_ :: Node a -> Subscription a b -> EventM ()
+subscribe_ :: MonadIORef m => Node a -> Subscription a b -> m ()
 subscribe_ node = void . subscribe node
 
 createNode :: MakeNode a -> EventM (Node a)
@@ -339,7 +340,7 @@ switch :: Behavior (Event a) -> Event a
 switch (Constant e) = e
 switch b = unsafeCreateEvent (MakeSwitch b)
 
-makeSwitch :: Behavior (Event a) -> EventM (Node a)
+makeSwitch ::  Behavior (Event a) -> EventM (Node a)
 makeSwitch source =  do
   connRef <- newRef Nothing
   rec
@@ -395,7 +396,7 @@ connectSwitches :: [Connect] -> EventM ()
 connectSwitches connects = do
   recomputes <- traverse reconnect connects
   liftIO $ for_ (catMaybes recomputes) $ \(SomeNode n, height) ->
-    recomputeHeight height n
+    recomputeInvalid height n
 
 
 
@@ -428,7 +429,7 @@ merge events = case catEvents (DMap.toAscList events) of
   refs -> unsafeCreateEvent (MakeMerge refs)
 
 
-mergeSubscribing :: GCompare k =>  Merge k -> DSum (WrapArg Node k) -> EventM (DSum (WrapArg (MergeParent k) k))
+mergeSubscribing :: GCompare k =>  Merge k -> DSum (WrapArg Node k) -> IO (DSum (WrapArg (MergeParent k) k))
 mergeSubscribing  merge' (WrapArg k :=> parent) = do
   subscribe_ parent sub
   return (WrapArg k :=> MergeParent parent sub)
@@ -436,14 +437,14 @@ mergeSubscribing  merge' (WrapArg k :=> parent) = do
   where sub = MergeSub merge' k
 
 
-makeMerge :: GCompare k => [DSum (WrapArg NodeRef k)] -> EventM (Node (DMap k))
+makeMerge :: GCompare k =>  [DSum (WrapArg NodeRef k)] -> EventM (Node (DMap k))
 makeMerge refs = do
   parents <- traverseDSums readNodeRef refs
   height <- maximumHeight <$> sequence (mapDSums readHeight parents)
   values <- catDSums <$> traverseDSums readNode parents
 
   rec
-    subs <- traverse (mergeSubscribing merge') parents
+    subs   <- liftIO $ traverse (mergeSubscribing merge') parents
     merge' <- Merge node (fromAsc subs) <$> newRef DMap.empty
     node <- newNode (succ height) (SubscribingMerge merge')
 
@@ -583,17 +584,19 @@ invalidateHeight newHeight node  = do
       sub -> traverseDest (invalidateHeight newHeight) sub
 
 
-recomputeHeight :: Height -> Node a -> IO ()
-recomputeHeight newHeight node = do
+recomputeInvalid :: Height -> Node a -> IO ()
+recomputeInvalid newHeight node = do
   height <- readHeight node
   when (height == Invalid) $ do
     writeRef (nodeHeight node) newHeight
     forSubs node $ \case
       MergeSub (Merge dest parents _)  _ -> do
         mergeHeight <- maximumHeight <$> sequence (mapDMap (\(MergeParent p _) -> readHeight p) parents)
-        when (isValid mergeHeight) $ recomputeHeight (succ mergeHeight) dest
-      sub -> traverseDest (recomputeHeight newHeight) sub
+        when (isValid mergeHeight) $ recomputeInvalid (succ mergeHeight) dest
+      sub -> traverseDest (recomputeInvalid newHeight) sub
 
+
+--recomputeHeight ::
 
 traverseDest :: Monad m => (Node b -> m ()) -> Subscription a b -> m ()
 traverseDest f (MergeSub  m _)    = f (mergeNode m)
@@ -811,6 +814,8 @@ mergeWith f es =  foldl1 f <$> mergeList es
 mergeList ::  [Event a] -> Event (NonEmpty a)
 mergeList es = NE.fromList . fromDMap <$> merge (eventDMap es)
 
+leftmost :: [Event a] -> Event a
+leftmost = mergeWith const
 
 -- DMap utilities
 catEvents ::  [DSum (WrapArg Event k)] -> [DSum (WrapArg NodeRef k)]
