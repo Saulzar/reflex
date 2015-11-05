@@ -41,6 +41,7 @@ library
     Reflex.Dynamic,
     Reflex.Dynamic.TH,
     Reflex.Host.Class,
+    Reflex.Test.Plan
     Data.Functor.Misc
 
   other-extensions: TemplateHaskell
