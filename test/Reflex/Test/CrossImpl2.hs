@@ -1,6 +1,6 @@
-{-# LANGUAGE GADTs #-}
+{-# LANGUAGE GADTs, RankNTypes #-}
 
-module Reflex.Test.CrossImpl2 (test) where
+module Main (main) where
 
 
 import Reflex.Class
@@ -8,7 +8,9 @@ import Reflex.Host.Class
 
 import Reflex.Dynamic
 
-import Reflex.Pure
+import Reflex.Pure (Pure)
+import qualified Reflex.Pure as P
+
 import Reflex.Test.Plan
 
 import Control.Monad.Identity
@@ -18,51 +20,51 @@ import qualified Data.IntMap as IntMap
 import Data.Traversable
 import Data.Foldable
 import System.Exit
+import Data.Monoid
 
 import Prelude
 
-mapToPureEvent :: Map Int a -> Event PureReflexDomain a
-mapToPureEvent m = P.Event $ flip Map.lookup m
+mapToPureEvent :: IntMap a -> Event PureReflexDomain a
+mapToPureEvent m = P.Event $ flip IntMap.lookup m
 
-type PureReflexDomain = P.Pure Int
+type PureReflexDomain = Pure Int
 type TimeM = (->) Int
 
-type RunPlan a = forall t m. TestPlan t m => m a
 
-
-class Testable a where
-
-
+type Test a = forall t m. TestPlan t m => m (Behavior t a)
 
 
 
 data TestCase  where
-  TestCase  :: Testable a =>  String -> RunPlan a -> TestCase
+  TestCase  :: Eq a => String -> Test a -> TestCase
+
+
+testAgreement :: Eq a => Test a -> IO Bool
+testAgreement _ = return True
 
 
 
-
-
-
-testCase :: [TestCase]
+testCases :: [TestCase]
 testCases =
-  [ TestCase "hold" $ hold "123" <$> fibAbc
-  , TestCase "count" $ count =<< fibAbc
-
+  [ TestCase "hold" (hold "asdf" =<< testEvents)
+--   , TestCase "count" (count =<< testEvents)
+  ]
 
 
   where
-    fibAbc = plan [(1, "a"), (2, "b"), (3, "c"), (5, "d"), (8, "e")]
+    testEvents :: TestPlan t m => m (Event t String)
+    testEvents = plan [(1, "a"), (2, "b"), (3, "c"), (5, "d"), (8, "e")]
 
 
-test :: IO ()
-test = do
-  results <- forM testCases $ \(name, TestCase inputs builder) -> do
-    putStrLn $ "Test: " <> name
-    testAgreement builder inputs
-  exitWith $ if and results
-             then ExitSuccess
-             else ExitFailure 1
+main :: IO ()
+main = do
+
+   results <- forM testCases $ \(TestCase name plan) -> do
+     putStrLn $ "Test: " <> name
+     testAgreement plan
+   exitWith $ if and results
+              then ExitSuccess
+              else ExitFailure 1
 
 
 {-

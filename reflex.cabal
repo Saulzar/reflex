@@ -50,7 +50,7 @@ library
 
 test-suite cross-impl
   type: exitcode-stdio-1.0
-  main-is: Reflex/Test/Mini.hs
+  main-is: Reflex/Test/CrossImpl2.hs
   ghc-options: -O2
   hs-source-dirs: test
   build-depends:
