@@ -1,22 +1,22 @@
-{-# LANGUAGE GADTs, RankNTypes #-}
+{-# LANGUAGE GADTs, RankNTypes, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, GeneralizedNewtypeDeriving #-}
 
 module Main (main) where
 
-
-import Reflex.Class
+import Reflex
 import Reflex.Host.Class
 
 import Reflex.Dynamic
-
-import Reflex.Pure (Pure)
-import qualified Reflex.Pure as P
-
 import Reflex.Test.Plan
 
-import Control.Monad.Identity
-import qualified Data.Set as Set
+import Reflex.Pure
+import Reflex.Test.PurePlan
+
+import Control.Monad.State
 import Data.IntMap (IntMap)
 import qualified Data.IntMap as IntMap
+import Data.IntSet (IntSet)
+import qualified Data.IntSet as IntSet
+
 import Data.Traversable
 import Data.Foldable
 import System.Exit
@@ -24,23 +24,19 @@ import Data.Monoid
 
 import Prelude
 
-mapToPureEvent :: IntMap a -> Event PureReflexDomain a
-mapToPureEvent m = P.Event $ flip IntMap.lookup m
-
-type PureReflexDomain = Pure Int
-type TimeM = (->) Int
-
-
 type Test a = forall t m. TestPlan t m => m (Behavior t a)
-
-
-
 data TestCase  where
-  TestCase  :: Eq a => String -> Test a -> TestCase
+  TestCase  :: (Show a, Eq a) => String -> Test a -> TestCase
 
 
-testAgreement :: Eq a => Test a -> IO Bool
-testAgreement _ = return True
+testAgreement :: (Show a, Eq a) => Test a -> IO Bool
+testAgreement test = do
+  r <- runSpiderHost $ testPlan test
+  when (r /= r') $ do
+    putStrLn ("Got: " ++ show r)
+    putStrLn ("Expected: " ++ show r')
+  return (r == r')
+    where r' = testPure test
 
 
 
@@ -65,6 +61,8 @@ main = do
    exitWith $ if and results
               then ExitSuccess
               else ExitFailure 1
+
+
 
 
 {-
