@@ -11,11 +11,10 @@ import Reflex.Test.Plan
 import Reflex.Pure
 import Reflex.Test.PurePlan
 
+import Control.Applicative
 import Control.Monad.State
 import Data.IntMap (IntMap)
 import qualified Data.IntMap as IntMap
-import Data.IntSet (IntSet)
-import qualified Data.IntSet as IntSet
 
 import Data.Traversable
 import Data.Foldable
@@ -24,55 +23,62 @@ import Data.Monoid
 
 import Prelude
 
-type Test a = forall t m. TestPlan t m => m (Behavior t a)
+type TestE a = forall t m. TestPlan t m => m (Event t a)
+type TestB a = forall t m. TestPlan t m => m (Behavior t a)
+
 data TestCase  where
-  TestCase  :: (Show a, Eq a) => String -> Test a -> TestCase
+  TestE  :: (Show a, Eq a) => TestE a -> TestCase
+  TestB  :: (Show a, Eq a) => TestB a -> TestCase
+
+-- Helpers to declare test cases
+testE :: (Eq a, Show a) => String -> TestE a -> (String, TestCase)
+testE name test = (name, TestE test)
+
+testB :: (Eq a, Show a) => String -> TestB a -> (String, TestCase)
+testB name test = (name, TestB test)
 
 
-testAgreement :: (Show a, Eq a) => Test a -> IO Bool
-testAgreement test = do
-  r <- runSpiderHost $ testPlan test
+testCases :: [(String, TestCase)]
+testCases =
+  [ testB "hold"  $ hold "0" =<< e1
+  , testB "count" $ current <$> (count =<< e2)
+  , testE "leftmost" $ liftA2 (\e e' -> leftmost [e, e']) e1 e2
+  ] where
+
+    e1, e2 :: TestPlan t m => m (Event t String)
+    e1 = plan [(1, "a"), (2, "b"), (3, "c"), (5, "d"), (8, "e")]
+    e2 = plan [(1, "a"), (3, "b"), (4, "c"), (6, "d"), (8, "e")]
+
+
+testAgreement :: TestCase -> IO Bool
+testAgreement (TestE plan) = do
+  r <- runSpiderHost $ testPlan plan
+  compareResult (r, testEvent $ runPure plan)
+testAgreement (TestB plan) = do
+  r <- runSpiderHost $ testPlan plan
+  compareResult (r, testBehavior $ runPure plan)
+
+
+compareResult :: (Show a, Eq a) => (IntMap a, IntMap a) -> IO Bool
+compareResult (r, r') = do
   when (r /= r') $ do
     putStrLn ("Got: " ++ show r)
     putStrLn ("Expected: " ++ show r')
   return (r == r')
-    where r' = testPure test
-
-
-
-testCases :: [TestCase]
-testCases =
-  [ TestCase "hold" (hold "asdf" =<< testEvents)
---   , TestCase "count" (count =<< testEvents)
-  ]
-
-
-  where
-    testEvents :: TestPlan t m => m (Event t String)
-    testEvents = plan [(1, "a"), (2, "b"), (3, "c"), (5, "d"), (8, "e")]
 
 
 main :: IO ()
 main = do
 
-   results <- forM testCases $ \(TestCase name plan) -> do
+   results <- forM testCases $ \(name, test) -> do
      putStrLn $ "Test: " <> name
-     testAgreement plan
+     testAgreement test
    exitWith $ if and results
               then ExitSuccess
               else ExitFailure 1
 
 
-
-
 {-
-  [ (,) "hold" $ TestCase (Map.singleton 0 "asdf", Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(_, e) -> do
-       b' <- hold "123" e
-       return (b', e)
-  , (,) "count" $ TestCase (Map.singleton 0 (), Map.fromList [(1, ()), (2, ()), (3, ())]) $ \(_, e) -> do
-       e' <- liftM updated $ count e
-       b' <- hold (0 :: Int) e'
-       return (b', e')
   , (,) "onceE-1" $ TestCase (Map.singleton 0 "asdf", Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
        e' <- onceE $ leftmost [e, e]
        return (b, e')

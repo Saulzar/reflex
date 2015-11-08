@@ -6,7 +6,7 @@ import Reflex
 import Reflex.Pure
 import Reflex.Test.Plan
 
-
+import Control.Monad.Fix
 import Control.Monad.State
 import Data.IntMap (IntMap)
 import qualified Data.IntMap as IntMap
@@ -25,7 +25,7 @@ mapToPureEvent :: IntMap a -> Event (Pure Int) a
 mapToPureEvent m = Event $ flip IntMap.lookup m
 
 type TimeM = (->) Int
-newtype PurePlan a = PurePlan { unPlan :: StateT IntSet TimeM a } deriving (Functor, Applicative, Monad)
+newtype PurePlan a = PurePlan { unPlan :: StateT IntSet TimeM a } deriving (Functor, Applicative, Monad, MonadFix)
 
 liftPlan :: TimeM a -> PurePlan a
 liftPlan = PurePlan . lift
@@ -46,9 +46,18 @@ instance TestPlan (Pure Int) PurePlan where
 runPure :: PurePlan a -> (a, IntSet)
 runPure (PurePlan p) = runStateT p mempty $ 0
 
-testPure :: PurePlan (Behavior (Pure Int) a) -> IntMap a
-testPure p = IntMap.fromSet (sample b) (IntSet.fromList [0..last + 1])
-  where
-    (b, occs) = runPure p
-    last = fromMaybe 0 (fst <$> IntSet.maxView occs)
+relavantTimes :: IntSet -> IntSet
+relavantTimes occs = IntSet.fromList [0..last + 1]
+  where last = fromMaybe 0 (fst <$> IntSet.maxView occs)
+
+testBehavior :: (Behavior (Pure Int) a, IntSet) -> IntMap a
+testBehavior (b, occs) = IntMap.fromSet (sample b) (relavantTimes occs)
+
+testEvent :: (Event (Pure Int) a, IntSet) -> IntMap (Maybe a)
+testEvent (Event readEvent, occs) = IntMap.fromSet readEvent (relavantTimes occs)
+
+
+
+
+
 

@@ -29,7 +29,7 @@ import Prelude
 
 type MonadIORef m = (MonadRef m, Ref m ~ Ref IO)
 
-class (Reflex t, MonadHold t m) => TestPlan t m where
+class (Reflex t, MonadHold t m, MonadFix m) => TestPlan t m where
   -- | Speicify a plan of an input Event firing
   -- Occurances must be in the future (i.e. Time > 0)
   -- Initial specification is
@@ -71,6 +71,8 @@ deriving instance ReflexHost t => Monad (Plan t)
 
 deriving instance ReflexHost t => MonadSample t (Plan t)
 deriving instance ReflexHost t => MonadHold t (Plan t)
+deriving instance ReflexHost t => MonadFix (Plan t)
+
 
 instance (ReflexHost t, MonadRef (HostFrame t), Ref (HostFrame t) ~ Ref IO) => TestPlan t (Plan t) where
   plan occurances = Plan $ do
