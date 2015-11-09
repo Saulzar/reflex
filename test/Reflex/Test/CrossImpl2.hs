@@ -37,19 +37,6 @@ testE name test = (name, TestE test)
 testB :: (Eq a, Show a) => String -> TestB a -> (String, TestCase)
 testB name test = (name, TestB test)
 
-
-testCases :: [(String, TestCase)]
-testCases =
-  [ testB "hold"  $ hold "0" =<< e1
-  , testB "count" $ current <$> (count =<< e2)
-  , testE "leftmost" $ liftA2 (\e e' -> leftmost [e, e']) e1 e2
-  ] where
-
-    e1, e2 :: TestPlan t m => m (Event t String)
-    e1 = plan [(1, "a"), (2, "b"), (3, "c"), (5, "d"), (8, "e")]
-    e2 = plan [(1, "a"), (3, "b"), (4, "c"), (6, "d"), (8, "e")]
-
-
 testAgreement :: TestCase -> IO Bool
 testAgreement (TestE plan) = do
   r <- runSpiderHost $ testPlan plan
@@ -78,109 +65,123 @@ main = do
               else ExitFailure 1
 
 
-{-
-  , (,) "onceE-1" $ TestCase (Map.singleton 0 "asdf", Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       e' <- onceE $ leftmost [e, e]
-       return (b, e')
-  , (,) "switch-1" $ TestCase (Map.singleton 0 "asdf", Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       let e' = fmap (const e) e
-       b' <- hold never e'
-       let e'' = switch b'
-       return (b, e'')
-  , (,) "switch-2" $ TestCase (Map.singleton 0 "asdf", Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       let e' = flip pushAlways e $ const $ do
-             let ea = fmap (const "a") e
-             let eb = fmap (const "b") e
-             let eab = leftmost [ea, eb]
-             liftM switch $ hold eab never
-           e'' = coincidence e'
-       return (b, e'')
-  , (,) "switch-3" $ TestCase (Map.singleton 0 "asdf", Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       let e' = flip pushAlways e $ const $ do
-             let ea = fmap (const "a") e
-             let eb = fmap (const "b") e
-             let eab = leftmost [ea, eb]
-             liftM switch $ hold eab (fmap (const e) e)
-           e'' = coincidence e'
-       return (b, e'')
-  , (,) "switch-4" $ TestCase (Map.singleton 0 "asdf", Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       let e' = leftmost [e, e]
-       e'' <- liftM switch $ hold e' (fmap (const e) e)
-       return (b, e'')
-  , (,) "switchPromptly-1" $ TestCase (Map.singleton 0 (0 :: Int), Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       let e' = fmap (const e) e
-       e'' <- switchPromptly never e'
-       return (b, e'')
-  , (,) "switchPromptly-2" $ TestCase (Map.singleton 0 (0 :: Int), Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       let e' = fmap (const e) e
-       e'' <- switchPromptly never $ leftmost [e', e']
-       return (b, e'')
-  , (,) "switchPromptly-3" $ TestCase (Map.singleton 0 (0 :: Int), Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       let e' = leftmost [e, e]
-       e'' <- switchPromptly never (fmap (const e) e')
-       return (b, e'')
-  , (,) "switchPromptly-4" $ TestCase (Map.singleton 0 (0 :: Int), Map.fromList [(1, "qwer"), (2, "lkj"), (3, "asdf")]) $ \(b, e) -> do
-       let e' = leftmost [e, e]
-       e'' <- switchPromptly never (fmap (const e') e)
-       return (b, e'')
-  , (,) "switch-5" $ TestCase (Map.singleton 0 (0 :: Int), Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       let e' = leftmost [e, e]
-       e'' <- liftM switch $ hold never (fmap (const e') e)
-       return (b, e'')
-  , (,) "switchPromptly-5" $ TestCase (Map.singleton 0 (0 :: Int), Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       let e' = flip push e $ \_ -> do
-             return . Just =<< onceE e
-       e'' <- switchPromptly never e'
-       return (b, e'')
-  , (,) "switchPromptly-6" $ TestCase (Map.singleton 0 (0 :: Int), Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       let e' = flip pushAlways e $ \_ -> do
-             switchPromptly e never
-       e'' <- switchPromptly never e'
-       return (b, e'')
-  , (,) "coincidence-1" $ TestCase (Map.singleton 0 (0 :: Int), Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       let e' = flip pushAlways e $ \_ -> return $ fmap id e
-           e'' = coincidence e'
-       return (b, e'')
-  , (,) "coincidence-2" $ TestCase (Map.singleton 0 (0 :: Int), Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       let e' = flip pushAlways e $ \_ -> return $ leftmost [e, e]
-           e'' = coincidence e'
-       return (b, e'')
-  , (,) "coincidence-3" $ TestCase (Map.singleton 0 (0 :: Int), Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       let e' = flip pushAlways e $ \_ -> return $ coincidence $ fmap (const e) e
-           e'' = coincidence e'
-       return (b, e'')
-  , (,) "coincidence-4" $ TestCase (Map.singleton 0 (0 :: Int), Map.fromList [(1, "qwer"), (2, "lkj"), (3, "asdf")]) $ \(b, e) -> do
-       let e' = flip pushAlways e $ \_ -> onceE e
-           e'' = coincidence e'
-       return (b, e'')
-  , (,) "coincidence-5" $ TestCase (Map.singleton 0 (0 :: Int), Map.fromList [(1, "qwer")]) $ \(b, e) -> do
-       let eChild = flip pushAlways e $ const $ do
-             let eNewValues = leftmost [e, e]
-             return $ coincidence $ fmap (const eNewValues) eNewValues
-           e' = coincidence eChild
-       return (b, e')
-  , (,) "coincidence-6" $ TestCase (Map.singleton 0 (0 :: Int), Map.fromList [(1, "qwer")]) $ \(b, e) -> do
-       let eChild = flip pushAlways e $ const $ do
-             let e' = coincidence $ fmap (const e) e
-             return $ leftmost [e', e']
-           e'' = coincidence eChild
-       return (b, e'')
-  , (,) "coincidence-7" $ TestCase (Map.singleton 0 (0 :: Int), Map.fromList [(1, "qwer"), (2, "lkj"), (3, "asdf")]) $ \(b, e) -> do
-       let e' = leftmost [e, e]
-           eCoincidences = coincidence $ fmap (const e') e
-       return (b, eCoincidences)
-  , (,) "holdWhileFiring" $ TestCase (Map.singleton 0 "zxc", Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       eo <- onceE e
-       bb <- hold b $ pushAlways (const $ hold "asdf" eo) eo
-       let b' = pull $ sample =<< sample bb
-       return (b', e)
-  , (,) "joinDyn" $ TestCase (Map.singleton 0 (0 :: Int), Map.fromList [(1, "qwer"), (2, "lkj")]) $ \(b, e) -> do
-       bb <- hold "b" e
-       bd <- hold never . fmap (const e) =<< onceE e
-       eOuter <- liftM (pushAlways sample . fmap (const bb)) $ onceE e
-       let eInner = switch bd
-           e' = leftmost [eOuter, eInner]
-       return (b, e')
-  ]
--}
+testCases :: [(String, TestCase)]
+testCases =
+  [ testB "hold"  $ hold "0" =<< events1
+  , testB "count" $ current <$> (count =<< events2)
+  , testE "leftmost" $ liftA2 leftmost2 events1 events2
+  , testE "onceE-1" $ do
+      e <- events1
+      onceE $ leftmost [e, e]
+
+  , testE "switch-1" $ do
+      e <- events1
+      b <- hold never (e <$ e)
+      return $ switch b
+
+  , testE "switch-2" $ do
+      e <- events1
+      return $ coincidence $ flip pushAlways e $ const $ do
+            switch <$> hold (leftmost ["a" <$ e, "b" <$ e]) (e <$ e)
+
+  , testE "switch-3" $ do
+      e <- events1
+      return $ coincidence $ flip pushAlways e $ const $ do
+          switch <$> hold (leftmost ["a" <$ e, "b" <$ e]) never
+
+  , testE "switch-4" $ do
+      e <- events1
+      switch <$> hold (deep e) (e <$ e)
+
+  , testE "switchPromptly-1" $ do
+      e <- events1
+      let e' = e <$ e
+      switchPromptly never $ e <$ e
+
+  , testE "switchPromptly-2" $ do
+      e <- events1
+      switchPromptly never $ deep (e <$ e)
+
+  , testE "switchPromptly-3" $ do
+      e <- events1
+      switchPromptly never $ (e <$ deep e)
+
+  , testE "switchPromptly-4" $ do
+      e <- events1
+      switchPromptly never $ (deep e <$ e)
+
+  , testE "switch-5" $ do
+      e <- events1
+      switch <$> hold never (deep e <$ e)
+
+  , testE "switchPromptly-5" $ do
+    e <- events1
+    switchPromptly never $ flip push e $
+      const (Just <$> onceE e)
+
+  , testE "switchPromptly-6" $ do
+      e <- events1
+      switchPromptly never $ flip pushAlways e $
+        const (switchPromptly e never)
+
+  , testE "coincidence-1" $ do
+      e <- events1
+      return $ coincidence $ flip pushAlways e $
+        const $ return (id <$> e)
+
+  , testE "coincidence-2" $ do
+      e <- events1
+      return $ coincidence $ flip pushAlways e $
+        const $ return (deep e)
+
+  , testE "coincidence-3" $ do
+      e <- events1
+      return $ coincidence $ flip pushAlways e $
+        const $ return (coincidence (e <$ e))
+
+  , testE "coincidence-4" $ do
+      e <- events1
+      return $ coincidence $ flip pushAlways e $
+        const (onceE e)
+
+  , testE "coincidence-5" $ do
+      e <- events1
+      return $ coincidence $ flip pushAlways e $ const $ do
+        let e' = deep e
+        return (coincidence (e' <$ e'))
+
+  , testE "coincidence-6" $ do
+      e <- events1
+      return $ coincidence $ flip pushAlways e $ const $ do
+        let e' = coincidence (e <$ e)
+        return $ deep e'
+
+  , testE "coincidence-7" $ do
+      e <- events1
+      return $ coincidence (deep e <$ e)
+
+  , testB "holdWhileFiring" $ do
+      e <- events1
+      eo <- onceE e
+      bb <- hold (constant "x") $ pushAlways (const $ hold "a" eo) eo
+      return $ pull $ sample =<< sample bb
+
+  , testE "joinDyn" $ do
+      e <- events1
+      bb <- hold "b" e
+      bd <- hold never . fmap (const e) =<< onceE e
+
+      eOuter <- liftM (pushAlways sample . fmap (const bb)) $ onceE e
+      let eInner = switch bd
+      return $ leftmost [eOuter, eInner]
+
+  ] where
+
+    events1, events2 :: TestPlan t m => m (Event t String)
+    events1 = plan [(1, "a"), (2, "b"), (3, "c"), (5, "d"), (8, "e")]
+    events2 = plan [(1, "a"), (3, "b"), (4, "c"), (6, "d"), (8, "e")]
+
+    deep e = leftmost [e, e]
+    leftmost2 e1 e2 = leftmost [e1, e2]
+
 

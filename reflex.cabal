@@ -31,7 +31,8 @@ library
     transformers-compat >= 0.3,
     haskell-src-exts == 1.16.*,
     haskell-src-meta == 0.6.*,
-    syb == 0.5.*
+    syb == 0.5.*,
+    deepseq
 
   exposed-modules:
     Reflex,
@@ -65,7 +66,7 @@ test-suite cross-impl
 benchmark spider-bench
   type: exitcode-stdio-1.0
   hs-source-dirs: bench
-  main-is: Mini.hs
+  main-is: Plan.hs
   ghc-options: -O2 
   build-depends:
     base,
@@ -76,7 +77,7 @@ benchmark spider-bench
     deepseq >= 1.3 && < 1.5,
     mtl,
     primitive,
-    criterion == 1.1.*,
+    criterion >= 1.0,
     reflex,
     split
 

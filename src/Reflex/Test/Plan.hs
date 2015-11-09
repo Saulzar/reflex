@@ -1,10 +1,16 @@
-{-# LANGUAGE ConstraintKinds, ExistentialQuantification, GADTs, ScopedTypeVariables, TypeFamilies, FlexibleInstances, MultiParamTypeClasses, GeneralizedNewtypeDeriving, RankNTypes, BangPatterns, UndecidableInstances, EmptyDataDecls, RecursiveDo, RoleAnnotations, FunctionalDependencies, FlexibleContexts, StandaloneDeriving #-}
+{-# LANGUAGE FunctionalDependencies, BangPatterns, UndecidableInstances, ConstraintKinds, GADTs, ScopedTypeVariables, FlexibleInstances, MultiParamTypeClasses, GeneralizedNewtypeDeriving, RankNTypes, RecursiveDo, FlexibleContexts, StandaloneDeriving #-}
 module Reflex.Test.Plan
   ( TestPlan(..)
   , Readable
   , runPlan
   , testPlan
   , Plan
+
+  , subscribePlan
+
+  , execSchedule
+  , readSchedule
+
 
   ) where
 
@@ -20,6 +26,8 @@ import Data.Monoid
 import Data.Maybe
 import qualified Data.IntMap as IntMap
 import Control.Monad.Ref
+import Control.DeepSeq (NFData (..))
+
 
 import Data.IntMap
 import Data.IORef
@@ -36,9 +44,20 @@ class (Reflex t, MonadHold t m, MonadFix m) => TestPlan t m where
 
   plan :: [(Word, a)] -> m (Event t a)
 
+
+
 data Firing t where
   Firing :: IORef (Maybe (EventTrigger t a)) -> a -> Firing t
 
+
+instance NFData (Behavior t a) where
+  rnf !_ = ()
+
+instance NFData (Event t a) where
+  rnf !_ = ()
+
+instance NFData (Firing t) where
+  rnf !_ = ()
 
 readEvent' :: MonadReadEvent t m => EventHandle t a -> m (Maybe a)
 readEvent' = readEvent >=> sequence
@@ -89,18 +108,17 @@ firingTrigger :: (MonadReflexHost t m, MonadIORef m) => Firing t -> m (Maybe (DS
 firingTrigger (Firing ref a) = fmap (:=> a) <$> readRef ref
 
 
-runPlan :: (MonadReflexHost t m, Readable t m a r, MonadIORef m) => Plan t a -> m (IntMap r)
-runPlan (Plan p) = do
-  (a, schedule) <- runHostFrame $ runStateT p mempty
-  execPlan schedule =<< getRead a
+runPlan :: (MonadReflexHost t m, MonadIORef m) => Plan t a -> m (a, Schedule t)
+runPlan (Plan p) = runHostFrame $ runStateT p mempty
 
 
 -- | Execute a plan, but add in extra frames to make it dense to properly test behaviors
 -- range of samples is from 0, maxFrame + 1 (to catch any change resulting from the last event)
 testPlan :: (MonadReflexHost t m, Readable t m a r, MonadIORef m) => Plan t a -> m (IntMap r)
-testPlan  (Plan p) = do
-  (a, schedule) <- runHostFrame $ runStateT p mempty
-  execPlan (makeDense schedule) =<< getRead a
+testPlan  p = do
+  (a, schedule) <- runPlan p
+  readSchedule (makeDense schedule) =<< getRead a
+
 
 
 makeDense :: Schedule t -> Schedule t
@@ -111,8 +129,15 @@ makeDense s = fromMaybe (emptyRange 0) $ do
       emptyRange end = IntMap.fromList (zip [0..end + 1] (repeat []))
 
 
-execPlan :: (MonadReflexHost t m, MonadIORef m) => Schedule t -> ReadPhase m a -> m (IntMap a)
-execPlan schedule readResult = fmap IntMap.fromList $
+
+subscribePlan :: (MonadReflexHost t m, Readable t m a r, MonadIORef m) => a -> m (ReadPhase m r)
+subscribePlan a = getRead a
+
+execSchedule :: (MonadReflexHost t m, Readable t m a r, MonadIORef m) => (a, Schedule t) -> m (IntMap r)
+execSchedule (a, schedule) = readSchedule schedule =<< getRead a
+
+readSchedule :: (MonadReflexHost t m, MonadIORef m) => Schedule t -> ReadPhase m a -> m (IntMap a)
+readSchedule schedule readResult = fmap IntMap.fromList $
   forM (IntMap.toList schedule) $ \(t, occs) -> do
     triggers <- catMaybes <$> traverse firingTrigger occs
     v <- fireEventsAndRead triggers readResult
