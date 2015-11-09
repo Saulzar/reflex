@@ -7,6 +7,10 @@ module Reflex.Test.Plan
   , readSchedule
   , testSchedule
   , readEvent'
+  , makeDense
+
+  , TestE
+  , TestB
 
   ) where
 
@@ -42,6 +46,8 @@ class (Reflex t, MonadHold t m, MonadFix m) => TestPlan t m where
   plan :: [(Word, a)] -> m (Event t a)
 
 
+type TestE a = forall t m. TestPlan t m => m (Event t a)
+type TestB a = forall t m. TestPlan t m => m (Behavior t a)
 
 data Firing t where
   Firing :: IORef (Maybe (EventTrigger t a)) -> a -> Firing t
