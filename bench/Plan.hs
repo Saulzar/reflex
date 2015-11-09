@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns, ScopedTypeVariables, TupleSections, GADTs, RankNTypes, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE TypeSynonymInstances, BangPatterns, ScopedTypeVariables, TupleSections, GADTs, RankNTypes, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, GeneralizedNewtypeDeriving #-}
 
 module Main where
 
@@ -7,6 +7,7 @@ import Criterion.Main
 
 import Reflex
 import Reflex.Host.Class
+import Reflex.Spider.Internal (SpiderEventHandle)
 import Reflex.Dynamic
 
 import Reflex.Test.Plan
@@ -16,6 +17,8 @@ import Control.Applicative
 import Data.Foldable
 import Data.Traversable
 import Data.List
+import Control.DeepSeq (NFData (..))
+
 
 import Prelude
 
@@ -37,7 +40,7 @@ one = plan [(1, 0)]
 
 -- Event which fires constantly over N frames
 frames :: TestPlan t m => Word -> m (Event t Word)
-frames n  = plan $ (\i -> (n, n)) <$> [1..n]
+frames n  = plan $ (\i -> (i, i)) <$> [1..n]
 
 -- N events all originating from one event
 fmapFan :: Reflex t => Word -> Event t Word -> [Event t Word]
@@ -56,30 +59,52 @@ sparseEvents n frames = do
     frameOccs = zip [1..] $ transpose $ chunksOf (fromIntegral frames) [1..n]
 
 
+instance NFData (SpiderEventHandle a) where
+  rnf !_ = ()
+
 -- Measure the running time
-benchFiring :: String -> Plan Spider (Event Spider a)  -> Benchmark
-benchFiring name plan = env (runSpiderHost $ runPlan plan)
-  (\s -> bench name $ whnfIO $ runSpiderHost $ execSchedule s)
+benchFiring :: Bench  -> Benchmark
+benchFiring (BenchE name plan) = env setup (\e -> bench name $ whnfIO $ run e)
+  where
+    run (h, s) = runSpiderHost $ readSchedule s (readEvent' h)
+    setup = runSpiderHost $ do
+      (e, s) <- runPlan plan
+      h <- subscribeEvent e
+      return (h, s)
+
+benchSubscribe :: Bench  -> Benchmark
+benchSubscribe (BenchE name plan) = bench name $ whnfIO $ runSpiderHost $
+  fst <$> runPlan plan >>= subscribeEvent
 
 
-benchSubscribe :: String -> Plan Spider (Event Spider a)  -> Benchmark
-benchSubscribe name plan = bench name (whnfIO $ runSpiderHost $ fst <$> runPlan plan >>= subscribeEvent)
+main :: IO ()
+main = defaultMain $  benchmarks 10000
 
 
-main = defaultMain
-  [ bgroup "subscribe"
-    [ benchSubscribe "fmapFan/merge" $ mergeList . fmapFan 10000 <$> one
-    , benchSubscribe "fmapFan/mergeTree 8" $ mergeTree 8 . fmapFan 10000 <$> one
-    , benchSubscribe "fmapChain" $ fmapChain 10000 <$> one
-    ]
+benchmarks :: Word ->  [Benchmark]
+benchmarks n =
+  [ bgroup ("subscribe " ++ show n) $ benchSubscribe <$> subs
+  , bgroup ("firing " ++ show n) $ benchFiring <$> (subs ++ firing)
+  ]
+    where subs = subscribeBench n
+          firing = firingBench n
+
+data Bench where
+  BenchE :: String -> (forall t m. TestPlan t m => m (Event t a)) -> Bench
 
 
-  , bgroup "merges"
-    [ benchFiring "dense mergeTree 8" $ mergeTree 8 <$> denseEvents 10000
-    , benchFiring "sparse 10/mergeTree 8" $ mergeTree 8 <$> sparseEvents 10000 10
-    , benchFiring "frames" $ frames 10000
-    ]
+subscribeBench :: Word -> [Bench]
+subscribeBench n =
+  [ BenchE "fmapFan/merge" $ mergeList . fmapFan n <$> one
+  , BenchE "fmapFan/mergeTree 8" $ mergeTree 8 . fmapFan n <$> one
+  , BenchE "fmapChain" $ fmapChain n <$> one
+  ]
 
+firingBench :: Word -> [Bench]
+firingBench n =
+  [ BenchE "dense mergeTree 8" $ mergeTree 8 <$> denseEvents 10000
+  , BenchE "sparse 10/mergeTree 8" $ mergeTree 8 <$> sparseEvents 10000 10
+  , BenchE "frames" $ frames 10000
   ]
 
 

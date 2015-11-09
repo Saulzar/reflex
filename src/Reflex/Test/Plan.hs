@@ -1,16 +1,12 @@
 {-# LANGUAGE FunctionalDependencies, BangPatterns, UndecidableInstances, ConstraintKinds, GADTs, ScopedTypeVariables, FlexibleInstances, MultiParamTypeClasses, GeneralizedNewtypeDeriving, RankNTypes, RecursiveDo, FlexibleContexts, StandaloneDeriving #-}
 module Reflex.Test.Plan
   ( TestPlan(..)
-  , Readable
   , runPlan
-  , testPlan
   , Plan
 
-  , subscribePlan
-
-  , execSchedule
   , readSchedule
-
+  , testSchedule
+  , readEvent'
 
   ) where
 
@@ -31,11 +27,12 @@ import Control.DeepSeq (NFData (..))
 
 import Data.IntMap
 import Data.IORef
+import System.Mem
 
 -- Note: this import must come last to silence warnings from AMP
 import Prelude
 
-type MonadIORef m = (MonadRef m, Ref m ~ Ref IO)
+type MonadIORef m = (MonadIO m, MonadRef m, Ref m ~ Ref IO)
 
 class (Reflex t, MonadHold t m, MonadFix m) => TestPlan t m where
   -- | Speicify a plan of an input Event firing
@@ -53,32 +50,16 @@ data Firing t where
 instance NFData (Behavior t a) where
   rnf !_ = ()
 
+
 instance NFData (Event t a) where
   rnf !_ = ()
 
 instance NFData (Firing t) where
   rnf !_ = ()
 
+
 readEvent' :: MonadReadEvent t m => EventHandle t a -> m (Maybe a)
 readEvent' = readEvent >=> sequence
-
-
-class MonadReflexHost t m => Readable t m a r | a -> r where
-  getRead ::  a -> m (ReadPhase m r)
-
-instance MonadReflexHost t m => Readable t m (Event t a) (Maybe a) where
-  getRead e = do
-    handle <- subscribeEvent e
-    return (readEvent' handle)
-
-instance MonadReflexHost t m => Readable t m (Behavior t a) a where
-  getRead b = return (sample b)
-
-instance (MonadReflexHost t m, Readable t m a r, Readable t m b s) => Readable t m (a, b) (r, s) where
-  getRead (a, b) = do
-    readA <- getRead a
-    readB <- getRead b
-    return (liftA2 (,) readA readB)
 
 type Schedule t = IntMap [Firing t]
 -- Implementation of a TestPlan
@@ -107,18 +88,8 @@ instance (ReflexHost t, MonadRef (HostFrame t), Ref (HostFrame t) ~ Ref IO) => T
 firingTrigger :: (MonadReflexHost t m, MonadIORef m) => Firing t -> m (Maybe (DSum (EventTrigger t)))
 firingTrigger (Firing ref a) = fmap (:=> a) <$> readRef ref
 
-
 runPlan :: (MonadReflexHost t m, MonadIORef m) => Plan t a -> m (a, Schedule t)
 runPlan (Plan p) = runHostFrame $ runStateT p mempty
-
-
--- | Execute a plan, but add in extra frames to make it dense to properly test behaviors
--- range of samples is from 0, maxFrame + 1 (to catch any change resulting from the last event)
-testPlan :: (MonadReflexHost t m, Readable t m a r, MonadIORef m) => Plan t a -> m (IntMap r)
-testPlan  p = do
-  (a, schedule) <- runPlan p
-  readSchedule (makeDense schedule) =<< getRead a
-
 
 
 makeDense :: Schedule t -> Schedule t
@@ -129,19 +100,19 @@ makeDense s = fromMaybe (emptyRange 0) $ do
       emptyRange end = IntMap.fromList (zip [0..end + 1] (repeat []))
 
 
-
-subscribePlan :: (MonadReflexHost t m, Readable t m a r, MonadIORef m) => a -> m (ReadPhase m r)
-subscribePlan a = getRead a
-
-execSchedule :: (MonadReflexHost t m, Readable t m a r, MonadIORef m) => (a, Schedule t) -> m (IntMap r)
-execSchedule (a, schedule) = readSchedule schedule =<< getRead a
+-- For the purposes of testing, we add in a zero frame and extend one frame (to observe changes to behaviors
+-- after the last event)
+-- performGC is called at each frame to test for GC issues
+testSchedule :: (MonadReflexHost t m, MonadIORef m) => Schedule t -> ReadPhase m a -> m (IntMap a)
+testSchedule schedule readResult = IntMap.traverseWithKey (\t occs -> liftIO performGC *> triggerFrame readResult t occs) (makeDense schedule)
 
 readSchedule :: (MonadReflexHost t m, MonadIORef m) => Schedule t -> ReadPhase m a -> m (IntMap a)
-readSchedule schedule readResult = fmap IntMap.fromList $
-  forM (IntMap.toList schedule) $ \(t, occs) -> do
+readSchedule schedule readResult = IntMap.traverseWithKey (triggerFrame readResult) schedule
+
+triggerFrame :: (MonadReflexHost t m, MonadIORef m) => ReadPhase m a -> Int -> [Firing t] -> m a
+triggerFrame readResult t occs =  do
     triggers <- catMaybes <$> traverse firingTrigger occs
-    v <- fireEventsAndRead triggers readResult
-    return (t, v)
+    fireEventsAndRead triggers readResult
 
 
 
