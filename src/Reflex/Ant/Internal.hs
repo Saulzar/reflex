@@ -82,9 +82,9 @@ data Subscription a b where
   CoinOuter :: Coincidence a -> Subscription (Event a) a
 
 instance Show (Subscription a b) where
-  show (PushSub {})   = "Push"
-  show (MergeSub {})  = "Merge"
-  show (HoldSub {})   = "Hold"
+  show (PushSub   {}) = "Push"
+  show (MergeSub  {}) = "Merge"
+  show (HoldSub   {}) = "Hold"
   show (SwitchSub {}) = "Switch"
   show (CoinInner {}) = "Inner Coincidence"
   show (CoinOuter {}) = "Outer Coincidence"
@@ -701,13 +701,14 @@ endFrame env  = do
   where
     clearNode (SomeNode node) = writeRef (nodeValue node) Nothing
 
-fireEventsAndRead :: [DSum Trigger] -> IO a -> IO a
+fireEventsAndRead :: [DSum Trigger] -> EventM a -> IO a
 fireEventsAndRead triggers runRead = do
-  env <- execEventM $ do
+  (a, env) <- runEventM $ do
     traverse_ propagateRoot triggers
     runDelays
-    initHolds
-  runRead <* endFrame env
+    runRead <* initHolds
+
+  a <$ endFrame env
 
   where
     runDelays = takeDelayed >>= traverse_  (\(height, merges) -> do
@@ -748,30 +749,48 @@ instance R.Reflex Ant where
   coincidence = AntEvent . coincidence . (unsafeCoerce :: Event (R.Event Ant a) -> Event (Event a)) . unAntEvent
 
 
-newtype AntHost a = AntHost { runAntHost :: IO a } deriving (Functor, Applicative, Monad, MonadFix, MonadIO)
-
-instance R.MonadSubscribeEvent Ant AntHost where
-  subscribeEvent = liftIO . subscribeEvent . unAntEvent
-
-instance R.MonadReflexCreateTrigger Ant AntHost where
-  newEventWithTrigger      = undefined
-  newFanEventWithTrigger f = undefined
-
-
-
+--HostFrame instances
 instance R.MonadSubscribeEvent Ant EventM where
-  subscribeEvent = liftIO . subscribeEvent . unAntEvent
+  subscribeEvent (AntEvent e) = liftIO $ subscribeEvent e
 
 instance R.MonadReflexCreateTrigger Ant EventM where
   newEventWithTrigger      = undefined
   newFanEventWithTrigger f = undefined
 
 
+instance R.MonadSample Ant BehaviorM where
+  sample (AntBehavior b) = sample b
+
+instance R.MonadSample Ant EventM where
+  sample (AntBehavior b) = sampleE b
+
+instance R.MonadHold Ant EventM where
+  hold a (AntEvent e) = AntBehavior <$> hold a e
+
+
+newtype AntHost a = AntHost { runAntHost :: IO a } deriving (Functor, Applicative, Monad, MonadFix, MonadIO)
+
+--Host instances
+instance R.MonadReflexCreateTrigger Ant AntHost where
+  newEventWithTrigger      = undefined
+  newFanEventWithTrigger f = undefined
+
+
+instance R.MonadSubscribeEvent Ant AntHost where
+  subscribeEvent (AntEvent e) = liftIO $ subscribeEvent e
+
+instance R.MonadReadEvent Ant EventM where
+  {-# INLINE readEvent #-}
+  readEvent h = fmap return <$> liftIO (readEvent h)
+
 instance R.MonadReflexHost Ant AntHost where
-  type ReadPhase AntHost = IO
+  type ReadPhase AntHost = EventM
 
   fireEventsAndRead es = liftIO . fireEventsAndRead es
   runHostFrame = liftIO . runHostFrame
+
+instance R.MonadSample Ant AntHost where
+  sample (AntBehavior b) = liftIO (sampleIO b)
 
 
 instance R.ReflexHost Ant where
@@ -780,14 +799,6 @@ instance R.ReflexHost Ant where
   type HostFrame Ant = EventM
 
 
-instance R.MonadSample Ant BehaviorM where
-  sample = sample . unAntBehavior
-
-instance R.MonadSample Ant EventM where
-  sample = sampleE . unAntBehavior
-
-instance R.MonadHold Ant EventM where
-  hold a = fmap AntBehavior . hold a . unAntEvent
 
 
 -- DMap utilities

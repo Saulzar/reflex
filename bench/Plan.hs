@@ -140,26 +140,26 @@ data Bench where
 
 subscribeBench :: Word -> [Bench]
 subscribeBench n =
-  [ BenchE "fmapFan merge" $ mergeList . fmapFan n <$> event
+  [ BenchE "fmapFan merge"       $ mergeList . fmapFan n <$> event
   , BenchE "fmapFan/mergeTree 8" $ mergeTree 8 . fmapFan n <$> event
-  , BenchE "fmapChain" $ fmapChain n <$> event
-  , BenchE "switchChain" $ switchChain n =<< event
+  , BenchE "fmapChain"           $ fmapChain n <$> event
+  , BenchE "switchChain"         $ switchChain n =<< event
   , BenchE "switchPromptlyChain" $ switchPromptlyChain n =<< event
-  , BenchE "switchFactors" $ switchFactors n =<< fmap (+1) <$> events 4
-  , BenchE "coincidenceChain" $ coinChain n <$> event
+  , BenchE "switchFactors"       $ switchFactors n =<< fmap (+1) <$> events 4
+  , BenchE "coincidenceChain"    $ coinChain n <$> event
   ]
 
 
 firingBench :: Word -> [Bench]
 firingBench n =
-  [ BenchE "dense mergeTree 8" $ mergeTree 8 <$> denseEvents n
-  , BenchE "sparse 10/mergeTree 8" $ mergeTree 8 <$> sparseEvents n 10
-  , BenchE "runFrame" $ events n
+  [ BenchE "dense mergeTree 8"      $ mergeTree 8 <$> denseEvents n
+  , BenchE "sparse 10/mergeTree 8"  $ mergeTree 8 <$> sparseEvents n 10
+  , BenchE "runFrame"               $ events n
   , BenchB "sum counters" $ do
       counts <- counters n 10
       return $ pull $ sum <$> traverse sample counts
 
-  , BenchB "pullChain" $ pullChain n . current <$> (count =<< events 4)
+  , BenchB "pullChain"                 $ pullChain n . current <$> (count =<< events 4)
   , BenchB "mergeTree (pull) counters" $ mergeTree 8 <$> counters n 10
   ]
 
