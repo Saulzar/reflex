@@ -502,6 +502,17 @@ never :: Event a
 never = Never
 
 
+
+
+newFanEventWithTrigger :: GCompare k => (forall a. k a -> Trigger a -> IO (IO ())) -> IO (EventSelector k)
+newFanEventWithTrigger f = do
+  Fan <$>  newRef DMap.empty <*> newRef DMap.empty <*> Just f
+
+
+  return $ \k -> unsafeCreateEvent (MakeFan k fan)
+
+
+
 newEventWithFire :: IO (Event a, a -> DSum Trigger)
 newEventWithFire = do
   root <- makeNode MakeRoot
