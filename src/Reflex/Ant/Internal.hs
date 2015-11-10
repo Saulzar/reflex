@@ -36,6 +36,7 @@ import Data.Functor.Misc
 import qualified Data.Dependent.Map as DMap
 import Data.Dependent.Map (DMap, GCompare)
 import Data.Dependent.Sum
+import Data.GADT.Compare
 
 import Data.Semigroup
 import Data.List.NonEmpty (NonEmpty)
@@ -53,7 +54,7 @@ data MakeNode a where
   MakeMerge       :: GCompare k => !([DSum (WrapArg NodeRef k)]) -> MakeNode (DMap k)
   MakeSwitch      :: !(Behavior (Event a)) -> MakeNode a
   MakeCoincidence :: !(NodeRef (Event a)) -> MakeNode a
-  MakeRoot        :: MakeNode a
+  MakeRoot        :: GCompare k => k a -> Root k -> MakeNode a
 
 type LazyRef a b = IORef (Either a b)
 newtype NodeRef a = NodeRef (LazyRef (MakeNode a) (Node a))
@@ -69,7 +70,11 @@ data Behavior a
   | PullB !(PullRef a)
   | HoldB !(Hold a)
 
+
+newtype Trigger a = Trigger (Node a)
 newtype EventHandle a = EventHandle { unEventHandle :: Maybe (Node a) }
+
+newtype EventSelector k = EventSelector { select :: forall a. k a -> Event a }
 
 type Height = Int
 
@@ -98,6 +103,7 @@ data Subscribing b where
   SubscribingRoot   :: Subscribing b
 
 data WeakSubscriber a = forall b. WeakSubscriber { unWeak :: !(Weak (Subscription a b)) }
+data SomeSubscriber a = forall b. SomeSubscriber !(Subscription a b)
 
 
 data Node a = Node
@@ -153,6 +159,11 @@ data Merge k = Merge
   , mergePartial  :: !(IORef (DMap k))
   }
 
+
+data Root k  = Root
+  { rootNodes :: IORef (DMap (WrapArg Weak (WrapArg Node k)))
+  , rootInit  :: (forall a. k a -> Trigger a -> IO (IO ()))
+  }
 
 -- A bunch of existentials used so we can put these things in lists
 data WriteHold      where WriteHold      :: Hold a    -> !a -> WriteHold
@@ -269,11 +280,11 @@ subscribe_ :: MonadIORef m => Node a -> Subscription a b -> m ()
 subscribe_ node = void . subscribe node
 
 createNode :: MakeNode a -> EventM (Node a)
-createNode (MakeNode ref f) = makePush ref f
-createNode (MakeMerge refs) = makeMerge refs
-createNode (MakeSwitch b) = makeSwitch b
+createNode (MakeNode ref f)      = makePush ref f
+createNode (MakeMerge refs)      = makeMerge refs
+createNode (MakeSwitch b)        = makeSwitch b
 createNode (MakeCoincidence ref) = makeCoincidence ref
-createNode MakeRoot = newNode 0 SubscribingRoot
+createNode (MakeRoot root k)     = makeRoot root k
 
 constant :: a -> Behavior a
 constant = Constant
@@ -367,9 +378,9 @@ makeCoincidence ref = do
 connectC :: Coincidence a -> Event a -> EventM (Maybe a)
 connectC _ Never = return Nothing
 connectC (Coincidence node parent _ innerSub) (Event ref) = do
-  inner <- readNodeRef ref
+  inner       <- readNodeRef ref
   innerHeight <- readHeight inner
-  height <- readHeight parent
+  height      <- readHeight parent
 
   value <- readNode inner
   case value of
@@ -502,36 +513,54 @@ never :: Event a
 never = Never
 
 
-
-
-newFanEventWithTrigger :: GCompare k => (forall a. k a -> Trigger a -> IO (IO ())) -> IO (EventSelector k)
-newFanEventWithTrigger f = do
-  Fan <$>  newRef DMap.empty <*> newRef DMap.empty <*> Just f
-
-
-  return $ \k -> unsafeCreateEvent (MakeFan k fan)
-
-
-
 newEventWithFire :: IO (Event a, a -> DSum Trigger)
 newEventWithFire = do
-  root <- makeNode MakeRoot
-  return (Event root, (Trigger root :=>))
+  node  <- newNode 0 SubscribingRoot
+  nodeRef  <- NodeRef <$> newIORef (Right node)
+  return (Event nodeRef, (Trigger node :=>))
 
+newFanEventWithTrigger :: forall k. GCompare k => (forall a. k a -> Trigger a -> IO (IO ())) -> IO (EventSelector k)
+newFanEventWithTrigger f = do
+  nodesRef <- newRef DMap.empty
+  let root = Root nodesRef f
+  return $ EventSelector $ \k -> unsafeCreateEvent (MakeRoot k root)
 
+newEventWithTrigger :: forall a. (Trigger a -> IO (IO ())) -> IO (Event a)
+newEventWithTrigger f = do
+  es <- newFanEventWithTrigger $ \Refl -> f
+  return $ select es Refl
 
-data Trigger a = Trigger (NodeRef a)
+makeRoot :: GCompare k => k a -> Root k -> EventM (Node a)
+makeRoot k root = liftIO $ do
+  nodes     <- readRef (rootNodes root)
+  maybeNode <- join <$> traverse deRefWeak (DMap.lookup k' nodes)
 
+  case maybeNode of
+    Just node -> return node
+    Nothing   -> do
+      node     <- newNode 0 SubscribingRoot
+      cleanup  <- rootInit root k (Trigger node)
+      weakNode <- mkWeakPtr node (Just cleanup)
+      writeRef (rootNodes root) (DMap.insert k' weakNode nodes)
+      return node
+  where k' = WrapArg (WrapArg k)
 
-
-traverseWeak :: MonadIORef m => (forall b. Subscription a b -> m ()) -> [WeakSubscriber a] -> m [WeakSubscriber a]
-traverseWeak f subs = do
-  flip filterM subs $ \(WeakSubscriber weak) -> do
+mapWeak :: MonadIORef m => (forall b. Subscription a b -> c) -> [WeakSubscriber a] -> m [(WeakSubscriber a, c)]
+mapWeak f subs = catMaybes <$> do
+  forM subs $ \w@(WeakSubscriber weak) -> do
     m <- liftIO (deRefWeak weak)
-    isJust m <$ traverse_ f m
+    return $ (\sub -> (w, f sub)) <$> m
 
+-- Be careful to read the subscriber list atomically, in case the actions run on the subscriber
+-- result in changes to the subscriber list!
+-- In which case we need to be very careful not to lose any new subscriptions
 traverseSubs :: MonadIORef m =>  (forall b. Subscription a b -> m ()) -> Node a -> m ()
-traverseSubs f node = modifyM (nodeSubs node) $ traverseWeak f
+traverseSubs f node = do
+  subs <- readRef (nodeSubs node)
+  (subs', actions) <- unzip <$> mapWeak f subs
+  writeRef (nodeSubs node) subs'
+  sequence_ actions
+
 
 
 forSubs :: MonadIORef m =>  Node a -> (forall b. Subscription a b -> m ()) -> m ()
@@ -644,7 +673,7 @@ propagateHeight newHeight node = do
       sub -> traverseDest (propagateHeight newHeight) sub
 
 traverseDest :: Monad m => (Node b -> m ()) -> Subscription a b -> m ()
-traverseDest f (MergeSub  m _)    = f (mergeNode m)
+traverseDest f (MergeSub  m _)     = f (mergeNode m)
 traverseDest f (PushSub  _ node _) = f node
 traverseDest f (SwitchSub s)       = f (switchNode s)
 traverseDest f (CoinInner c)       = f (coinNode c)
@@ -726,9 +755,7 @@ fireEventsAndRead triggers runRead = do
         traverse_ (propagateMerge height) merges
         runDelays)
 
-    propagateRoot (Trigger nodeRef :=> a) = do
-      node <- readNodeRef nodeRef
-      writePropagate 0 node a
+    propagateRoot (Trigger node :=> a) = writePropagate 0 node a
 
 fireEvents :: [DSum Trigger] -> IO ()
 fireEvents triggers = fireEventsAndRead triggers (return ())
@@ -765,9 +792,10 @@ instance R.MonadSubscribeEvent Ant EventM where
   subscribeEvent (AntEvent e) = liftIO $ subscribeEvent e
 
 instance R.MonadReflexCreateTrigger Ant EventM where
-  newEventWithTrigger      = undefined
-  newFanEventWithTrigger f = undefined
-
+  newEventWithTrigger    f = liftIO $ AntEvent <$> newEventWithTrigger f
+  newFanEventWithTrigger f = liftIO $ do
+    es <- newFanEventWithTrigger f
+    return $ R.EventSelector $ AntEvent . select es
 
 instance R.MonadSample Ant BehaviorM where
   sample (AntBehavior b) = sample b
@@ -783,9 +811,10 @@ newtype AntHost a = AntHost { runAntHost :: IO a } deriving (Functor, Applicativ
 
 --Host instances
 instance R.MonadReflexCreateTrigger Ant AntHost where
-  newEventWithTrigger      = undefined
-  newFanEventWithTrigger f = undefined
-
+  newEventWithTrigger    f = liftIO $ AntEvent <$> newEventWithTrigger f
+  newFanEventWithTrigger f = liftIO $ do
+    es <- newFanEventWithTrigger f
+    return $ R.EventSelector $ AntEvent . select es
 
 instance R.MonadSubscribeEvent Ant AntHost where
   subscribeEvent (AntEvent e) = liftIO $ subscribeEvent e
@@ -810,6 +839,14 @@ instance R.ReflexHost Ant where
   type HostFrame Ant = EventM
 
 
+instance MonadRef AntHost where
+  type Ref AntHost = Ref IO
+  {-# INLINE newRef #-}
+  {-# INLINE readRef #-}
+  {-# INLINE writeRef #-}
+  newRef = liftIO . newRef
+  readRef = liftIO . readRef
+  writeRef r a = liftIO $ writeRef r a
 
 
 -- DMap utilities

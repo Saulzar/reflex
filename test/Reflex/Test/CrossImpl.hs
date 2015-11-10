@@ -1,9 +1,11 @@
-{-# LANGUAGE GADTs, RankNTypes, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE ConstraintKinds, GADTs, RankNTypes, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, GeneralizedNewtypeDeriving #-}
 
 module Main (main) where
 
 import Reflex
 import Reflex.Host.Class
+
+import Reflex.Ant
 
 import Reflex.Dynamic
 import Reflex.Test.Plan
@@ -23,8 +25,6 @@ import Data.Monoid
 
 import Prelude
 
-type TestE a = forall t m. TestPlan t m => m (Event t a)
-type TestB a = forall t m. TestPlan t m => m (Behavior t a)
 
 data TestCase  where
   TestE  :: (Show a, Eq a) => TestE a -> TestCase
@@ -37,31 +37,42 @@ testE name test = (name, TestE test)
 testB :: (Eq a, Show a) => String -> TestB a -> (String, TestCase)
 testB name test = (name, TestB test)
 
-readEvent' :: MonadReadEvent t m => EventHandle t a -> m (Maybe a)
-readEvent' = readEvent >=> sequence
+
+runTestB :: (MonadReflexHost t m, MonadIORef m) => Plan t (Behavior t a) -> m (IntMap a)
+runTestB plan = do
+  (b, s) <- runPlan plan
+  testSchedule s $ sample b
+
+runTestE :: (MonadReflexHost t m, MonadIORef m) => Plan t (Event t a) -> m (IntMap (Maybe a))
+runTestE plan = do
+  (e, s) <- runPlan plan
+  h <- subscribeEvent e
+  testSchedule s (readEvent' h)
+
 
 testAgreement :: TestCase -> IO Bool
 testAgreement (TestE plan) = do
-  r <- runSpiderHost $ do
-    (e, s) <- runPlan plan
-    h <- subscribeEvent e
-    testSchedule s (readEvent' h)
+  spider <- runSpiderHost $ runTestE plan
+  ant    <- runAntHost $ runTestE plan
+  let results = [("spider", spider), ("ant", ant)]
 
-  compareResult (r, testEvent $ runPure plan)
+  compareResult results (testEvent $ runPure plan)
+
 testAgreement (TestB plan) = do
-  r <- runSpiderHost $ do
-    (b, s) <- runPlan plan
-    testSchedule s $ sample b
+  spider <- runSpiderHost $ runTestB plan
+  ant    <- runAntHost $ runTestB plan
+  let results = [("spider", spider), ("ant", ant)]
 
-  compareResult (r, testBehavior $ runPure plan)
+  compareResult results (testBehavior $ runPure plan)
 
 
-compareResult :: (Show a, Eq a) => (IntMap a, IntMap a) -> IO Bool
-compareResult (r, r') = do
-  when (r /= r') $ do
-    putStrLn ("Got: " ++ show r)
-    putStrLn ("Expected: " ++ show r')
-  return (r == r')
+compareResult :: (Show a, Eq a) => [(String, IntMap a)] -> IntMap a -> IO Bool
+compareResult results expected = fmap and $ forM results $ \(name, r) -> do
+
+  when (r /= expected) $ do
+    putStrLn ("Got: " ++ show (name, r))
+    putStrLn ("Expected: " ++ show expected)
+  return (r == expected)
 
 
 main :: IO ()

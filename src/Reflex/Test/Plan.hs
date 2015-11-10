@@ -12,6 +12,8 @@ module Reflex.Test.Plan
   , TestE
   , TestB
 
+  , MonadIORef
+
   ) where
 
 import Reflex.Class

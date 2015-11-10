@@ -6,7 +6,7 @@ module Main where
 -- import Test.QuickCheck hiding (sample)
 -- import Test.QuickCheck.Monadic
 
-import Reflex.MiniSpider
+import Reflex.Ant.Internal
 import Data.Traversable
 import Data.Foldable
 
