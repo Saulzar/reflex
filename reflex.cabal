@@ -80,7 +80,8 @@ benchmark spider-bench
     primitive,
     criterion >= 1.0,
     reflex,
-    split
+    split,
+    ref-tf
 
 source-repository head
   type: git

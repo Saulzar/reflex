@@ -1,4 +1,4 @@
-{-# LANGUAGE TypeSynonymInstances, BangPatterns, ScopedTypeVariables, TupleSections, GADTs, RankNTypes, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE ConstraintKinds, TypeSynonymInstances, BangPatterns, ScopedTypeVariables, TupleSections, GADTs, RankNTypes, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, GeneralizedNewtypeDeriving #-}
 
 module Main where
 
@@ -10,6 +10,9 @@ import Reflex.Host.Class
 import Reflex.Spider.Internal (SpiderEventHandle)
 import Reflex.Dynamic
 
+import Reflex.Ant
+import qualified Reflex.Ant.Internal as Ant
+
 import Reflex.Test.Plan
 import Control.Monad.IO.Class
 
@@ -20,7 +23,12 @@ import Data.List
 import Control.DeepSeq (NFData (..))
 import Data.Bifunctor
 
+import Data.IORef
+import Control.Monad.Ref
+
 import Prelude
+
+type MonadReflexHost' t m = (MonadReflexHost t m, MonadIORef m, MonadIORef (HostFrame t))
 
 mergeTree :: Num a => (Monoid (f [a]), Functor f) => Int -> [f a] -> f a
 mergeTree n es | length es <= n =  sum' es
@@ -95,30 +103,53 @@ counters :: TestPlan t m => Word -> Word -> m [Behavior t Int]
 counters n frames = traverse (fmap current . count) =<< sparseEvents n frames
 
 
+instance NFData (Ant.EventHandle a) where
+  rnf !_ = ()
 
 instance NFData (SpiderEventHandle a) where
   rnf !_ = ()
 
+
+setupFiring ::   (MonadReflexHost t m, MonadIORef m) => Plan t (Event t a) -> m (Ignore (EventHandle t a), Schedule t)
+setupFiring plan = do
+  (e, s) <- runPlan plan
+  h <- subscribeEvent e
+  return (Ignore h, s)
+
+-- Hack to avoid the NFData constraint for EventHandle which is a synonym
+newtype Ignore a = Ignore a
+instance NFData (Ignore a) where
+  rnf !_ = ()
+
+
 -- Measure the running time
-benchFiring :: Bench  -> Benchmark
-benchFiring (BenchE name plan) = env setup (\e -> bench name $ whnfIO $ run e)
-  where
-    run (h, s) = runSpiderHost $ readSchedule s (readEvent' h)
-    setup = runSpiderHost $ do
-      (e, s) <- runPlan plan
-      h <- subscribeEvent e
-      return (h, s)
+benchFiring ::  (MonadReflexHost' t m) => (forall a. m a -> IO a) -> (String, TestCase) -> Benchmark
+benchFiring runHost (name, TestE plan) = env setup (\e -> bench name $ whnfIO $ run e) where
+    run (Ignore h, s) = runHost $ readSchedule s (readEvent' h)
+    setup = runHost $ setupFiring plan
 
-benchFiring (BenchB name plan) = env setup (\e -> bench name $ whnfIO $ run e)
-  where
-    run (b, s) = runSpiderHost $ readSchedule s (sample b)
-    setup = runSpiderHost $ second makeDense <$> runPlan plan
+benchFiring runHost (name, TestB plan) = env setup (\e -> bench name $ whnfIO $ run e) where
+    run (b, s) = runHost $ readSchedule s (sample b)
+    setup = runHost $ second makeDense <$> runPlan plan
 
 
-benchSubscribe :: Bench  -> Benchmark
-benchSubscribe (BenchE name plan) = bench name $ whnfIO $ runSpiderHost $
+benchSubscribe :: (MonadReflexHost' t m) => (forall a. m a -> IO a) -> (String, TestCase) -> Benchmark
+benchSubscribe runHost (name, TestE plan) = bench name $ whnfIO $ runHost $
   fst <$> runPlan plan >>= subscribeEvent
 
+
+benchAllFiring ::  (String, TestCase) -> Benchmark
+benchAllFiring (name, test) = bgroup name
+  [ benchFiring runSpiderHost ("spider", test)
+  , benchFiring runAntHost ("ant", test)
+  ]
+
+
+benchAllSubscribe ::  (String, TestCase) -> Benchmark
+benchAllSubscribe (name, test) = bgroup name
+  [ benchSubscribe runSpiderHost ("spider", test)
+  , benchSubscribe runAntHost ("ant", test)
+  ]
 
 main :: IO ()
 main = defaultMain $ (benchmarks 1000 ++ benchmarks 10000)
@@ -126,41 +157,36 @@ main = defaultMain $ (benchmarks 1000 ++ benchmarks 10000)
 
 benchmarks :: Word ->  [Benchmark]
 benchmarks n =
-  [ bgroup ("subscribe " ++ show n) $ benchSubscribe <$> subs
-  , bgroup ("firing " ++ show n) $ benchFiring <$> (subs ++ firing)
+  [ bgroup ("subscribe " ++ show n) $ benchAllSubscribe <$> subs
+  , bgroup ("firing " ++ show n) $ benchAllFiring <$>  (subs ++ firing)
   ]
     where subs = subscribeBench n
           firing = firingBench n
 
-data Bench where
-  BenchE :: String -> TestE a -> Bench
-  BenchB :: String -> TestB a -> Bench
 
-
-
-subscribeBench :: Word -> [Bench]
+subscribeBench :: Word -> [(String, TestCase)]
 subscribeBench n =
-  [ BenchE "fmapFan merge"       $ mergeList . fmapFan n <$> event
-  , BenchE "fmapFan/mergeTree 8" $ mergeTree 8 . fmapFan n <$> event
-  , BenchE "fmapChain"           $ fmapChain n <$> event
-  , BenchE "switchChain"         $ switchChain n =<< event
-  , BenchE "switchPromptlyChain" $ switchPromptlyChain n =<< event
-  , BenchE "switchFactors"       $ switchFactors n =<< fmap (+1) <$> events 4
-  , BenchE "coincidenceChain"    $ coinChain n <$> event
+  [ testE "fmapFan merge"       $ mergeList . fmapFan n <$> event
+  , testE "fmapFan/mergeTree 8" $ mergeTree 8 . fmapFan n <$> event
+  , testE "fmapChain"           $ fmapChain n <$> event
+  , testE "switchChain"         $ switchChain n =<< event
+  , testE "switchPromptlyChain" $ switchPromptlyChain n =<< event
+  , testE "switchFactors"       $ switchFactors n =<< fmap (+1) <$> events 4
+  , testE "coincidenceChain"    $ coinChain n <$> event
   ]
 
 
-firingBench :: Word -> [Bench]
+firingBench :: Word -> [(String, TestCase)]
 firingBench n =
-  [ BenchE "dense mergeTree 8"      $ mergeTree 8 <$> denseEvents n
-  , BenchE "sparse 10/mergeTree 8"  $ mergeTree 8 <$> sparseEvents n 10
-  , BenchE "runFrame"               $ events n
-  , BenchB "sum counters" $ do
+  [ testE "dense mergeTree 8"      $ mergeTree 8 <$> denseEvents n
+  , testE "sparse 10/mergeTree 8"  $ mergeTree 8 <$> sparseEvents n 10
+  , testE "runFrame"               $ events n
+  , testB "sum counters" $ do
       counts <- counters n 10
       return $ pull $ sum <$> traverse sample counts
 
-  , BenchB "pullChain"                 $ pullChain n . current <$> (count =<< events 4)
-  , BenchB "mergeTree (pull) counters" $ mergeTree 8 <$> counters n 10
+  , testB "pullChain"                 $ pullChain n . current <$> (count =<< events 4)
+  , testB "mergeTree (pull) counters" $ mergeTree 8 <$> counters n 10
   ]
 
 

@@ -3,14 +3,18 @@ module Reflex.Test.Plan
   ( TestPlan(..)
   , runPlan
   , Plan
+  , Schedule
 
   , readSchedule
   , testSchedule
   , readEvent'
   , makeDense
 
-  , TestE
-  , TestB
+  , TestCase (..)
+
+  , runTestE, runTestB
+  , testE, testB
+  , TestE, TestB
 
   , MonadIORef
 
@@ -46,6 +50,29 @@ class (Reflex t, MonadHold t m, MonadFix m) => TestPlan t m where
   -- Initial specification is
 
   plan :: [(Word, a)] -> m (Event t a)
+
+
+data TestCase  where
+  TestE  :: (Show a, Eq a) => TestE a -> TestCase
+  TestB  :: (Show a, Eq a) => TestB a -> TestCase
+
+-- Helpers to declare test cases
+testE :: (Eq a, Show a) => String -> TestE a -> (String, TestCase)
+testE name test = (name, TestE test)
+
+testB :: (Eq a, Show a) => String -> TestB a -> (String, TestCase)
+testB name test = (name, TestB test)
+
+runTestB :: (MonadReflexHost t m, MonadIORef m) => Plan t (Behavior t a) -> m (IntMap a)
+runTestB p = do
+  (b, s) <- runPlan p
+  testSchedule s $ sample b
+
+runTestE :: (MonadReflexHost t m, MonadIORef m) => Plan t (Event t a) -> m (IntMap (Maybe a))
+runTestE p = do
+  (e, s) <- runPlan p
+  h <- subscribeEvent e
+  testSchedule s (readEvent' h)
 
 
 type TestE a = forall t m. TestPlan t m => m (Event t a)
@@ -118,7 +145,7 @@ readSchedule :: (MonadReflexHost t m, MonadIORef m) => Schedule t -> ReadPhase m
 readSchedule schedule readResult = IntMap.traverseWithKey (triggerFrame readResult) schedule
 
 triggerFrame :: (MonadReflexHost t m, MonadIORef m) => ReadPhase m a -> Int -> [Firing t] -> m a
-triggerFrame readResult t occs =  do
+triggerFrame readResult _ occs =  do
     triggers <- catMaybes <$> traverse firingTrigger occs
     fireEventsAndRead triggers readResult
 
