@@ -18,6 +18,7 @@ import Control.Monad.State
 import Data.IntMap (IntMap)
 import qualified Data.IntMap as IntMap
 
+import Data.Char
 import Data.Traversable
 import Data.Foldable
 import System.Exit
@@ -25,29 +26,6 @@ import Data.Monoid
 
 import Prelude
 
-
-data TestCase  where
-  TestE  :: (Show a, Eq a) => TestE a -> TestCase
-  TestB  :: (Show a, Eq a) => TestB a -> TestCase
-
--- Helpers to declare test cases
-testE :: (Eq a, Show a) => String -> TestE a -> (String, TestCase)
-testE name test = (name, TestE test)
-
-testB :: (Eq a, Show a) => String -> TestB a -> (String, TestCase)
-testB name test = (name, TestB test)
-
-
-runTestB :: (MonadReflexHost t m, MonadIORef m) => Plan t (Behavior t a) -> m (IntMap a)
-runTestB plan = do
-  (b, s) <- runPlan plan
-  testSchedule s $ sample b
-
-runTestE :: (MonadReflexHost t m, MonadIORef m) => Plan t (Event t a) -> m (IntMap (Maybe a))
-runTestE plan = do
-  (e, s) <- runPlan plan
-  h <- subscribeEvent e
-  testSchedule s (readEvent' h)
 
 
 testAgreement :: TestCase -> IO Bool
@@ -90,6 +68,35 @@ testCases :: [(String, TestCase)]
 testCases =
   [ testB "hold"  $ hold "0" =<< events1
   , testB "count" $ current <$> (count =<< events2)
+  , testB "pull"  $ do
+      b <- hold "0" =<< events1
+      return (id <$> id <$> b)
+
+
+  , testB "pull-2" $ do
+      b1 <- behavior1
+      return (id <$> pull $ liftA2 (<>) (sample b1) (sample b1))
+
+  , testB "pull-3" $ do
+      b1 <- behavior1
+      b2 <- behavior2
+      return (id <$> pull $ liftA2 (<>) (sample b1) (sample b2))
+
+  , testE "tag-1" $ do
+      b1 <- behavior1
+      e <- events2
+      return (tag b1 e)
+
+  , testE "tag-2" $ do
+      b1 <- behavior1
+      e <- events2
+      return (tag (map toUpper <$>  b1) e)
+
+  , testE "attach-1" $ do
+      b1 <- behavior1
+      e <- events2
+      return (attachWith (++) (map toUpper <$> b1) e)
+
   , testE "leftmost" $ liftA2 leftmost2 events1 events2
   , testE "onceE-1" $ do
       e <- events1
@@ -196,11 +203,30 @@ testCases =
       let eInner = switch bd
       return $ leftmost [eOuter, eInner]
 
+  , testB "foldDyn"  $ do
+      d <- foldDyn (++) "0" =<< events1
+      return (current d)
+
+  , testB "mapDyn"  $ do
+      d <- foldDyn (++) "0" =<< events1
+      current <$> mapDyn (map toUpper) d
+
+  , testB "combineDyn"  $ do
+      d1 <- foldDyn (++) "0" =<< events1
+      d2 <- mapDyn (map toUpper) =<< foldDyn (++) "0" =<< events2
+
+      current <$> combineDyn (<>) d1 d2
+
   ] where
 
     events1, events2 :: forall t m. TestPlan t m => m (Event t String)
     events1 = plan [(1, "a"), (2, "b"), (3, "c"), (5, "d"), (8, "e")]
     events2 = plan [(1, "a"), (3, "b"), (4, "c"), (6, "d"), (8, "e")]
+
+    behavior1, behavior2 :: forall t m. TestPlan t m => m (Behavior t String)
+    behavior1 =  hold "1" =<< events1
+    behavior2 =  hold "2" =<< events2
+
 
     deep e = leftmost [e, e]
     leftmost2 e1 e2 = leftmost [e1, e2]

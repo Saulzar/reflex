@@ -66,9 +66,9 @@ data Event a
   | Event !(NodeRef a)
 
 data Behavior a
-  = Constant !a
-  | PullB !(PullRef a)
-  | HoldB !(Hold a)
+  = Constant a
+  | PullB (PullRef a)
+  | HoldB (Hold a)
 
 
 newtype Trigger a = Trigger (Node a)
@@ -102,9 +102,7 @@ data Subscribing b where
   SubscribingCoin   :: Coincidence a -> Subscribing a
   SubscribingRoot   :: Subscribing b
 
-data WeakSubscriber a = forall b. WeakSubscriber { unWeak :: !(Weak (Subscription a b)) }
-data SomeSubscriber a = forall b. SomeSubscriber !(Subscription a b)
-
+data WeakSubscriber a = forall b. WeakSubscriber { unWeak :: (Weak (Subscription a b)) }
 
 data Node a = Node
   { nodeSubs      :: !(IORef [WeakSubscriber a])
@@ -545,22 +543,26 @@ makeRoot k root = liftIO $ do
       return node
   where k' = WrapArg (WrapArg k)
 
-mapWeak :: MonadIORef m => (forall b. Subscription a b -> c) -> [WeakSubscriber a] -> m [(WeakSubscriber a, c)]
-mapWeak f subs = catMaybes <$> do
-  forM subs $ \w@(WeakSubscriber weak) -> do
+
+
+traverseWeak :: MonadIORef m => (forall b. Subscription a b -> m ()) -> [WeakSubscriber a] -> m [WeakSubscriber a]
+traverseWeak f subs = do
+  flip filterM subs $ \(WeakSubscriber weak) -> do
     m <- liftIO (deRefWeak weak)
-    return $ (\sub -> (w, f sub)) <$> m
+    case m of
+      Nothing  -> return False
+      Just sub -> True <$ f sub
+
 
 -- Be careful to read the subscriber list atomically, in case the actions run on the subscriber
 -- result in changes to the subscriber list!
 -- In which case we need to be very careful not to lose any new subscriptions
+
 traverseSubs :: MonadIORef m =>  (forall b. Subscription a b -> m ()) -> Node a -> m ()
 traverseSubs f node = do
-  subs <- readRef (nodeSubs node)
-  (subs', actions) <- unzip <$> mapWeak f subs
-  writeRef (nodeSubs node) subs'
-  sequence_ actions
-
+  subs  <- takeRef (nodeSubs node)
+  subs' <- traverseWeak f subs
+  modifyRef (nodeSubs node) (++subs')
 
 
 forSubs :: MonadIORef m =>  Node a -> (forall b. Subscription a b -> m ()) -> m ()
@@ -847,6 +849,66 @@ instance MonadRef AntHost where
   newRef = liftIO . newRef
   readRef = liftIO . readRef
   writeRef r a = liftIO $ writeRef r a
+
+
+instance (Monoid a) => Monoid (Behavior a) where
+  mempty = constant mempty
+  mappend a b = pull $ liftM2 mappend (sample a) (sample b)
+  mconcat = pull . liftM mconcat . mapM sample
+
+instance (Semigroup a) => Monoid (Event a) where
+  mempty = never
+  mappend a b = mconcat [a, b]
+  mconcat = fmap sconcat . mergeList
+
+
+tag :: Behavior b -> Event a -> Event b
+tag b = pushAlways $ \_ -> sampleE b
+
+attachWith :: (a -> b -> c) -> Behavior a -> Event b -> Event c
+attachWith f b = pushAlways $ \x -> flip f x <$> sampleE b
+
+counter :: Event a -> EventM (Event Int)
+counter e = mdo
+  n <- hold 0 next
+
+  let next = attachWith (+) n (1 <$ e)
+  return next
+
+
+
+foldDyn :: (a -> b -> b) -> b -> Event a -> EventM (Event b, Behavior b)
+foldDyn f initial e = do
+  rec
+    let e' = flip pushAlways e $ \a -> f a <$> sampleE b
+    b <- hold initial e'
+
+  return (e', b)
+
+
+headE ::  Event  a -> EventM (Event a)
+headE e = do
+  rec be <- hold e $ fmap (const never) e'
+      let e' = switch be
+      e' `seq` return ()
+  return e'
+
+
+eventDMap :: [Event a] -> DMap (WrapArg Event (Const2 Int a))
+eventDMap es = fromAsc $ map (\(k, v) -> WrapArg (Const2 k) :=> v) $ zip [0 :: Int ..] es
+
+fromDMap :: DMap (Const2 Int a) -> [a]
+fromDMap = map (\(Const2 _ :=> v) -> v) . DMap.toList
+
+mergeWith :: (a -> a -> a) -> [Event a] -> Event a
+mergeWith f es =  foldl1 f <$> mergeList es
+
+mergeList ::  [Event a] -> Event (NonEmpty a)
+mergeList es = NE.fromList . fromDMap <$> merge (eventDMap es)
+
+leftmost :: [Event a] -> Event a
+leftmost = mergeWith const
+
 
 
 -- DMap utilities
