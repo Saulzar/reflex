@@ -34,7 +34,7 @@ import Data.Maybe
 import Data.Functor.Misc
 
 import qualified Data.Dependent.Map as DMap
-import Data.Dependent.Map (DMap, GCompare)
+import Data.Dependent.Map (DMap)
 import Data.Dependent.Sum
 import Data.GADT.Compare
 
@@ -49,10 +49,11 @@ import qualified Reflex.Class as R
 import qualified Reflex.Host.Class as R
 
 
+
 data MakeNode a where
-  MakeNode        :: !(NodeRef a) -> !(a -> EventM (Maybe b)) -> MakeNode b
-  MakeMerge       :: GCompare k => !([DSum (WrapArg NodeRef k)]) -> MakeNode (DMap k)
-  MakeSwitch      :: !(Behavior (Event a)) -> MakeNode a
+  MakeNode        :: NodeRef a -> (a -> EventM (Maybe b)) -> MakeNode b
+  MakeMerge       :: GCompare k => [DSum (WrapArg NodeRef k)] -> MakeNode (DMap k)
+  MakeSwitch      :: Behavior (Event a) -> MakeNode a
   MakeCoincidence :: !(NodeRef (Event a)) -> MakeNode a
   MakeRoot        :: GCompare k => k a -> Root k -> MakeNode a
 
@@ -99,10 +100,10 @@ data Subscribing b where
   Subscribing       :: (Subscription a b) -> Subscribing b
   SubscribingMerge  :: (Merge k) -> Subscribing (DMap k)
   SubscribingSwitch :: (Switch a) -> Subscribing a
-  SubscribingCoin   :: Coincidence a -> Subscribing a
+  SubscribingCoin   :: (Coincidence a) -> Subscribing a
   SubscribingRoot   :: Subscribing b
 
-data WeakSubscriber a = forall b. WeakSubscriber { unWeak :: (Weak (Subscription a b)) }
+data WeakSubscriber a = forall b. WeakSubscriber { unWeak :: !(Weak (Subscription a b)) }
 
 data Node a = Node
   { nodeSubs      :: !(IORef [WeakSubscriber a])
@@ -164,12 +165,12 @@ data Root k  = Root
   }
 
 -- A bunch of existentials used so we can put these things in lists
-data WriteHold      where WriteHold      :: Hold a    -> !a -> WriteHold
-data HoldInit       where HoldInit       :: Hold a    -> HoldInit
-data Connect        where Connect        :: Switch a  -> Connect
-data DelayMerge     where DelayMerge     :: Merge k   -> DelayMerge
-data CoincidenceOcc where CoincidenceOcc :: NodeSub a ->  CoincidenceOcc
-data SomeNode       where SomeNode       :: Node a    -> SomeNode
+data WriteHold      where WriteHold      :: !(Hold a)    -> !a -> WriteHold
+data HoldInit       where HoldInit       :: !(Hold a)    -> HoldInit
+data Connect        where Connect        :: !(Switch a)  -> Connect
+data DelayMerge     where DelayMerge     :: !(Merge k)   -> DelayMerge
+data CoincidenceOcc where CoincidenceOcc :: !(NodeSub a) ->  CoincidenceOcc
+data SomeNode       where SomeNode       :: !(Node a)    -> SomeNode
 
 
 -- EvenM environment, lists of things which need attention at the end of a frame
@@ -188,20 +189,16 @@ newtype BehaviorM a = BehaviorM { unBehaviorM :: ReaderT (Weak Invalidator) IO a
     deriving (Functor, Applicative, Monad, MonadFix, MonadIO, MonadReader (Weak Invalidator))
 
 
+type MonadIORef m = (MonadIO m, MonadRef m, Ref m ~ IORef)
+
 instance MonadRef EventM where
   type Ref EventM = Ref IO
-  {-# INLINE newRef #-}
-  {-# INLINE readRef #-}
-  {-# INLINE writeRef #-}
   newRef = liftIO . newRef
   readRef = liftIO . readRef
   writeRef r a = liftIO $ writeRef r a
 
 instance MonadRef BehaviorM where
   type Ref BehaviorM = Ref IO
-  {-# INLINE newRef #-}
-  {-# INLINE readRef #-}
-  {-# INLINE writeRef #-}
   newRef = liftIO . newRef
   readRef = liftIO . readRef
   writeRef r a = liftIO $ writeRef r a
@@ -222,10 +219,6 @@ unsafeCreateEvent = Event . NodeRef . unsafeLazy
 
 createEvent  :: MakeNode a -> IO (Event a)
 createEvent create = Event <$> makeNode create
-
-
-
-type MonadIORef m = (MonadIO m, MonadRef m, Ref m ~ IORef)
 
 
 readLazy :: MonadIORef m => (a -> m b) -> LazyRef a b -> m b
@@ -269,8 +262,8 @@ readEvent (EventHandle n) = join <$> traverse readNode n
 
 
 subscribe :: MonadIORef m => Node a -> Subscription a b -> m (Weak (Subscription a b))
-subscribe node sub = do
-  weakSub <- liftIO (mkWeakPtr sub Nothing)
+subscribe node sub = liftIO $ do
+  weakSub <- mkWeakPtr sub Nothing
   modifyRef (nodeSubs node) (WeakSubscriber weakSub :)
   return weakSub
 
@@ -472,8 +465,8 @@ makePush ref f =  do
     let sub = PushSub parent node f
     node <- newNode height (Subscribing sub)
 
-  readNode parent >>= traverse_
-    (f >=> traverse_ (writeNode node))
+  m <- readNode parent
+  traverse_ (f >=> traverse_ (writeNode node)) m
 
   subscribe_ parent sub
   return node

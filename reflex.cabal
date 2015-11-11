@@ -1,5 +1,5 @@
 Name: reflex
-Version: 0.3.2
+Version: 0.4.0
 Synopsis: Higher-order Functional Reactive Programming
 Description: Reflex is a high-performance, deterministic, higher-order Functional Reactive Programming system
 License: BSD3
@@ -49,7 +49,7 @@ library
     Data.Functor.Misc
 
   other-extensions: TemplateHaskell
-  ghc-options: -Wall -fwarn-tabs  -O2
+  ghc-options: -Wall  -fwarn-tabs  -O2
 
 test-suite cross-impl
   type: exitcode-stdio-1.0
