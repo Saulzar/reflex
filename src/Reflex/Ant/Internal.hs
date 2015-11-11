@@ -718,13 +718,12 @@ subscribeEvent e = evalEventM $ EventHandle <$> eventNode e
 
 
 takeDelayed :: EventM (Maybe (Height, [DelayMerge]))
-takeDelayed = do
-  delaysRef <- asks envDelays
-  delayed   <- readRef delaysRef
+takeDelayed = asks envDelays >>= \delaysRef -> liftIO $ do
+    delayed   <- readRef delaysRef
 
-  let view = IntMap.minViewWithKey delayed
-  traverse_ (writeRef delaysRef) (snd <$> view)
-  return (fst <$> view)
+    let view = IntMap.minViewWithKey delayed
+    traverse_ (writeRef delaysRef) (snd <$> view)
+    return (fst <$> view)
 
 
 endFrame :: Env -> IO ()

@@ -1,68 +1,16 @@
 {-# LANGUAGE ConstraintKinds, GADTs, RankNTypes, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, GeneralizedNewtypeDeriving #-}
 
-module Main (main) where
+module Reflex.Test.Micro (testCases) where
 
 import Reflex
-import Reflex.Host.Class
-
-import Reflex.Ant
-
 import Reflex.Dynamic
-import Reflex.Test.Plan
-
-import Reflex.Pure
-import Reflex.Test.PurePlan
+import Reflex.TestPlan
 
 import Control.Applicative
-import Control.Monad.State
-import Data.IntMap (IntMap)
-import qualified Data.IntMap as IntMap
-
 import Data.Char
-import Data.Traversable
-import Data.Foldable
-import System.Exit
 import Data.Monoid
 
 import Prelude
-
-
-
-testAgreement :: TestCase -> IO Bool
-testAgreement (TestE plan) = do
-  spider <- runSpiderHost $ runTestE plan
-  ant    <- runAntHost $ runTestE plan
-  let results = [("spider", spider), ("ant", ant)]
-
-  compareResult results (testEvent $ runPure plan)
-
-testAgreement (TestB plan) = do
-  spider <- runSpiderHost $ runTestB plan
-  ant    <- runAntHost $ runTestB plan
-  let results = [("spider", spider), ("ant", ant)]
-
-  compareResult results (testBehavior $ runPure plan)
-
-
-compareResult :: (Show a, Eq a) => [(String, IntMap a)] -> IntMap a -> IO Bool
-compareResult results expected = fmap and $ forM results $ \(name, r) -> do
-
-  when (r /= expected) $ do
-    putStrLn ("Got: " ++ show (name, r))
-    putStrLn ("Expected: " ++ show expected)
-  return (r == expected)
-
-
-main :: IO ()
-main = do
-
-   results <- forM testCases $ \(name, test) -> do
-     putStrLn $ "Test: " <> name
-     testAgreement test
-   exitWith $ if and results
-              then ExitSuccess
-              else ExitFailure 1
-
 
 testCases :: [(String, TestCase)]
 testCases =
@@ -199,7 +147,7 @@ testCases =
       bb <- hold "b" e
       bd <- hold never . fmap (const e) =<< onceE e
 
-      eOuter <- liftM (pushAlways sample . fmap (const bb)) $ onceE e
+      eOuter <- pushAlways sample . fmap (const bb) <$> onceE e
       let eInner = switch bd
       return $ leftmost [eOuter, eInner]
 

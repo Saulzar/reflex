@@ -1,10 +1,10 @@
 {-# LANGUAGE GADTs, RankNTypes, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, GeneralizedNewtypeDeriving, ScopedTypeVariables #-}
 
-module Reflex.Test.PurePlan where
+module Reflex.Plan.Pure where
 
 import Reflex
 import Reflex.Pure
-import Reflex.Test.Plan
+import Reflex.TestPlan
 
 import Control.Monad.Fix
 import Control.Monad.State

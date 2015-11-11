@@ -45,15 +45,14 @@ library
     Reflex.Dynamic,
     Reflex.Dynamic.TH,
     Reflex.Host.Class,
-    Reflex.Test.Plan
     Data.Functor.Misc
 
   other-extensions: TemplateHaskell
   ghc-options: -Wall  -fwarn-tabs  -O2
 
-test-suite cross-impl
+test-suite all
   type: exitcode-stdio-1.0
-  main-is: Reflex/Test/CrossImpl.hs
+  main-is: Reflex/Test/RunAll.hs
   ghc-options: -O2
   hs-source-dirs: test
   build-depends:
@@ -63,15 +62,18 @@ test-suite cross-impl
     mtl,
     containers,
     dependent-map,
-    MemoTrie == 0.6.*
+    dependent-sum,
+    MemoTrie == 0.6.*,
+    split
 
-benchmark spider-bench
+benchmark bench
   type: exitcode-stdio-1.0
-  hs-source-dirs: bench
-  main-is: Plan.hs
+  hs-source-dirs: bench test
+  main-is: RunAll.hs
   ghc-options: -O2 
   build-depends:
     base,
+    containers,
     dependent-sum,
     dependent-map,
     transformers >= 0.3 && < 0.5,

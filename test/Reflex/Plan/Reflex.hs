@@ -1,27 +1,26 @@
 {-# LANGUAGE FunctionalDependencies, BangPatterns, UndecidableInstances, ConstraintKinds, GADTs, ScopedTypeVariables, FlexibleInstances, MultiParamTypeClasses, GeneralizedNewtypeDeriving, RankNTypes, RecursiveDo, FlexibleContexts, StandaloneDeriving #-}
-module Reflex.Test.Plan
+module Reflex.Plan.Reflex
   ( TestPlan(..)
   , runPlan
   , Plan
   , Schedule
+  , Firing (..)
+  , MonadIORef
+
 
   , readSchedule
   , testSchedule
   , readEvent'
   , makeDense
 
-  , TestCase (..)
-
-  , runTestE, runTestB
-  , testE, testB
-  , TestE, TestB
-
-  , MonadIORef
+  , runTestE
+  , runTestB
 
   ) where
 
 import Reflex.Class
 import Reflex.Host.Class
+import Reflex.TestPlan
 
 import Control.Applicative
 import Control.Monad
@@ -32,7 +31,6 @@ import Data.Monoid
 import Data.Maybe
 import qualified Data.IntMap as IntMap
 import Control.Monad.Ref
-import Control.DeepSeq (NFData (..))
 
 
 import Data.IntMap
@@ -44,60 +42,13 @@ import Prelude
 
 type MonadIORef m = (MonadIO m, MonadRef m, Ref m ~ Ref IO)
 
-class (Reflex t, MonadHold t m, MonadFix m) => TestPlan t m where
-  -- | Speicify a plan of an input Event firing
-  -- Occurances must be in the future (i.e. Time > 0)
-  -- Initial specification is
-
-  plan :: [(Word, a)] -> m (Event t a)
-
-
-data TestCase  where
-  TestE  :: (Show a, Eq a) => TestE a -> TestCase
-  TestB  :: (Show a, Eq a) => TestB a -> TestCase
-
--- Helpers to declare test cases
-testE :: (Eq a, Show a) => String -> TestE a -> (String, TestCase)
-testE name test = (name, TestE test)
-
-testB :: (Eq a, Show a) => String -> TestB a -> (String, TestCase)
-testB name test = (name, TestB test)
-
-runTestB :: (MonadReflexHost t m, MonadIORef m) => Plan t (Behavior t a) -> m (IntMap a)
-runTestB p = do
-  (b, s) <- runPlan p
-  testSchedule s $ sample b
-
-runTestE :: (MonadReflexHost t m, MonadIORef m) => Plan t (Event t a) -> m (IntMap (Maybe a))
-runTestE p = do
-  (e, s) <- runPlan p
-  h <- subscribeEvent e
-  testSchedule s (readEvent' h)
-
-
-type TestE a = forall t m. TestPlan t m => m (Event t a)
-type TestB a = forall t m. TestPlan t m => m (Behavior t a)
-
 data Firing t where
   Firing :: IORef (Maybe (EventTrigger t a)) -> a -> Firing t
 
 
-instance NFData (Behavior t a) where
-  rnf !_ = ()
-
-
-instance NFData (Event t a) where
-  rnf !_ = ()
-
-instance NFData (Firing t) where
-  rnf !_ = ()
-
-
-readEvent' :: MonadReadEvent t m => EventHandle t a -> m (Maybe a)
-readEvent' = readEvent >=> sequence
-
 type Schedule t = IntMap [Firing t]
--- Implementation of a TestPlan
+
+-- Implementation of a TestPlan in terms of ReflexHost
 newtype Plan t a = Plan (StateT (Schedule t) (HostFrame t) a)
 
 deriving instance ReflexHost t => Functor (Plan t)
@@ -150,7 +101,20 @@ triggerFrame readResult _ occs =  do
     fireEventsAndRead triggers readResult
 
 
+readEvent' :: MonadReadEvent t m => EventHandle t a -> m (Maybe a)
+readEvent' = readEvent >=> sequence
 
 
+-- Convenience functions for running tests producing Events/Behaviors
+runTestB :: (MonadReflexHost t m, MonadIORef m) => Plan t (Behavior t a) -> m (IntMap a)
+runTestB p = do
+  (b, s) <- runPlan p
+  testSchedule s $ sample b
+
+runTestE :: (MonadReflexHost t m, MonadIORef m) => Plan t (Event t a) -> m (IntMap (Maybe a))
+runTestE p = do
+  (e, s) <- runPlan p
+  h <- subscribeEvent e
+  testSchedule s (readEvent' h)
 
 
