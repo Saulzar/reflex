@@ -9,6 +9,10 @@ import Reflex.TestPlan
 import Control.Applicative
 import Data.Char
 import Data.Monoid
+import Data.Functor.Misc
+
+import Data.Map (Map)
+import qualified Data.Map as Map
 
 import Prelude
 
@@ -164,17 +168,37 @@ testCases =
       d2 <- mapDyn (map toUpper) =<< foldDyn (++) "0" =<< events2
 
       current <$> combineDyn (<>) d1 d2
+  , testE "fan-1" $ do
+      e <- fmap toMap <$> events1
+      let es = select (fanMap e) . Const2 <$> values
+
+      return (mergeList es)
+
+  , testE "fan-2" $ do
+      e <- fmap toMap <$> events3
+      let es = select (fanMap e) . Const2 <$> values
+
+      return (mergeList es)
+
+  , testE "fan-2" $ do
+      e <- fmap toMap <$> events3
+      return $  select (fanMap e) (Const2 'b')
 
   ] where
 
-    events1, events2 :: forall t m. TestPlan t m => m (Event t String)
-    events1 = plan [(1, "a"), (2, "b"), (3, "c"), (5, "d"), (8, "e")]
-    events2 = plan [(1, "a"), (3, "b"), (4, "c"), (6, "d"), (8, "e")]
+    events1, events2, events3 :: forall t m. TestPlan t m => m (Event t String)
+    events1 = plan [(1, "a"), (2, "b"), (5, "c"), (7, "d"), (8, "e")]
+    events2 = plan [(1, "e"), (3, "d"), (4, "c"), (6, "b"), (7, "a")]
+
+    events3 = liftA2 appendEvents events1 events2
+
+    values = "abcde"
+    toMap str = Map.fromList $ map (\c -> (c, c)) str
+
 
     behavior1, behavior2 :: forall t m. TestPlan t m => m (Behavior t String)
     behavior1 =  hold "1" =<< events1
     behavior2 =  hold "2" =<< events2
-
 
     deep e = leftmost [e, e]
     leftmost2 e1 e2 = leftmost [e1, e2]

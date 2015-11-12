@@ -17,18 +17,16 @@
 
 module Reflex.Ant.Internal where
 
-import Data.IORef
-import System.Mem.Weak
 
-import System.IO.Unsafe
+import qualified Reflex.Class as R
+import qualified Reflex.Host.Class as R
+
 import Control.Monad.Ref
 import Control.Monad.Reader
 import Control.Monad.State.Strict
-
 import Control.Monad.Primitive
 
-import Unsafe.Coerce
-
+import Data.Semigroup
 import Data.Foldable
 import Data.Maybe
 import Data.Functor.Misc
@@ -38,17 +36,13 @@ import Data.Dependent.Map (DMap)
 import Data.Dependent.Sum
 import Data.GADT.Compare
 
-import Data.Semigroup
-import Data.List.NonEmpty (NonEmpty)
-import qualified Data.List.NonEmpty as NE
-
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 
-import qualified Reflex.Class as R
-import qualified Reflex.Host.Class as R
-
-
+import Data.IORef
+import System.Mem.Weak
+import System.IO.Unsafe
+import Unsafe.Coerce
 
 data MakeNode a where
   MakeNode        :: NodeRef a -> (a -> EventM (Maybe b)) -> MakeNode b
@@ -497,8 +491,7 @@ mergeSubscribing :: GCompare k =>  Merge k -> DSum (WrapArg Node k) -> IO (DSum 
 mergeSubscribing  merge' (WrapArg k :=> parent) = do
   subscribe_ parent sub
   return (WrapArg k :=> MergeParent parent sub)
-
-  where sub = MergeSub merge' k
+    where sub = MergeSub merge' k
 
 
 makeMerge :: GCompare k =>  [DSum (WrapArg NodeRef k)] -> EventM (Node (DMap k))
@@ -509,10 +502,10 @@ makeMerge refs = do
 
   rec
     subs   <- liftIO $ traverse (mergeSubscribing merge') parents
-    merge' <- Merge node (fromAsc subs) <$> newRef DMap.empty
+    merge' <- Merge node (DMap.fromDistinctAscList subs) <$> newRef DMap.empty
     node <- newNode (succ height) (SubscribingMerge merge')
 
-  when (not  . null  $ values) $ writeNode node (fromAsc values)
+  when (not  . null  $ values) $ writeNode node (DMap.fromDistinctAscList values)
   return node
 
 never :: Event a
@@ -530,25 +523,49 @@ makeFan :: GCompare k => NodeRef (DMap k) -> EventM (Fan k)
 makeFan ref = do
   parent <- readNodeRef ref
   rec
-    let sub = FanSub f
-    f <- Fan parent sub <$> newRef DMap.empty
+    let sub = FanSub fan'
+    fan' <- Fan parent sub <$> newRef DMap.empty
 
   subscribe_ parent sub
-  return f
+  return fan'
 
-lookupWeak :: GCompare k =>  k a -> DMap (WrapArg WeakNode k) -> k a -> IO (Maybe a)
-lookupWeak k nodes = join <$> traverse (deRefWeak . unWeakNode)  (DMap.lookup (WrapArg k) nodes)
+lookupWeakNode :: GCompare k =>  DMap (WrapArg WeakNode k) -> k a -> IO (Maybe (Node a))
+lookupWeakNode nodes k = case DMap.lookup (WrapArg k) nodes of
+  Nothing              -> return Nothing
+  Just (WeakNode node) -> deRefWeak node
+
+traverseWeakNode :: (MonadIORef m) => (Node a -> m ()) -> WeakNode a -> m ()
+traverseWeakNode f (WeakNode node) = liftIO (deRefWeak node) >>= traverse_ f
 
 
-lookupTraverse :: GCompare k => k a ->  IORef (DMap (WrapArg WeakNode k)) -> (a -> IO ()) -> IO ()
-lookupTraverse k nodesRef = undefined
+traverseWeakNodes :: forall m k. (MonadIORef m) => (forall a. Node a -> m ()) -> IORef (DMap (WrapArg WeakNode k)) -> m ()
+traverseWeakNodes f nodesRef = do
+  nodes <- readRef nodesRef
+  for_ (DMap.toList nodes) traverseNode'
 
+  where
+    traverseNode' :: DSum (WrapArg WeakNode k) -> m ()
+    traverseNode' (WrapArg _ :=> node) = traverseWeakNode f node
+
+traverseNode :: (GCompare k, MonadIORef m) => DMap (WrapArg WeakNode k) -> k a -> (Node a -> m ()) -> m ()
+traverseNode nodes k f = traverse_ (traverseWeakNode f) (DMap.lookup (WrapArg k) nodes)
+
+
+-- Check that the key is still valid (otherwise remove it)
+-- Runs as a finalizer for fan nodes
+cleanKey :: GCompare k => IORef (DMap (WrapArg WeakNode k)) -> k a -> IO ()
+cleanKey nodesRef k = do
+  nodes <- readRef nodesRef
+  for_ (DMap.lookup (WrapArg k) nodes) $ \(WeakNode node) -> do
+    m <- deRefWeak node
+    when (isNothing m) $ do
+      writeRef nodesRef (DMap.delete (WrapArg k) nodes)
 
 -- Lookup a weak node cache, and create it if it doesn't exist (or has been GC'ed)
 lookupFan :: (GCompare k, MonadIORef m) => IORef (DMap (WrapArg WeakNode k)) -> k a -> m (Node a, Maybe (IO ())) -> m (Node a)
 lookupFan nodesRef k create = do
   nodes     <- readRef nodesRef
-  maybeNode <- liftIO (lookupWeak k nodes)
+  maybeNode <- liftIO (lookupWeakNode nodes k)
 
   case maybeNode of
     Just node -> return node
@@ -598,8 +615,8 @@ makeRoot k (Root nodes subscr) = liftIO $ lookupFan nodes k $ do
   return (node, Just finalizer)
 
 
-traverseWeak :: MonadIORef m => (forall b. Subscription a b -> m ()) -> [WeakSubscriber a] -> m [WeakSubscriber a]
-traverseWeak f subs = do
+traverseWeakSubs :: MonadIORef m => (forall b. Subscription a b -> m ()) -> [WeakSubscriber a] -> m [WeakSubscriber a]
+traverseWeakSubs f subs = do
   flip filterM subs $ \(WeakSubscriber weak) -> do
     m <- liftIO (deRefWeak weak)
     case m of
@@ -614,7 +631,7 @@ traverseWeak f subs = do
 traverseSubs :: MonadIORef m =>  (forall b. Subscription a b -> m ()) -> Node a -> m ()
 traverseSubs f node = do
   subs  <- takeRef (nodeSubs node)
-  subs' <- traverseWeak f subs
+  subs' <- traverseWeakSubs f subs
   modifyRef (nodeSubs node) (++subs')
 
 
@@ -666,16 +683,10 @@ propagate  height node value = traverseSubs propagate' node where
   propagate' (SwitchSub s) = writePropagate height (switchNode s) value
   propagate' (CoinInner c) = writePropagate height (coinNode c) value
   propagate' (CoinOuter c) = connectC c value >>= traverse_ (propagate height (coinNode c))
-  propagate  (FanSub    f) = do
+  propagate' (FanSub    f) = do
     nodes <- readRef (fanNodes f)
-
-    for_ (DMap.toList value) $ \(k :=> v) -> do
-
-
-    DMap.lookup k (fanNodes f) >>= \case ->
-      Nothing ->
-
-
+    for_ (DMap.toList value) $ \(k :=> v) ->
+      traverseNode nodes k $ \n -> writePropagate height n v
 
 
 propagateMerge :: Height -> DelayMerge -> EventM ()
@@ -736,12 +747,13 @@ propagateHeight newHeight node = do
       MergeSub (Merge dest _ _)  _ -> propagateHeight (succ newHeight) dest
       sub -> traverseDest (propagateHeight newHeight) sub
 
-traverseDest :: Monad m => (Node b -> m ()) -> Subscription a b -> m ()
+traverseDest :: MonadIORef m => (forall c. Node c -> m ()) -> Subscription a b -> m ()
 traverseDest f (MergeSub  m _)     = f (mergeNode m)
 traverseDest f (PushSub  _ node _) = f node
 traverseDest f (SwitchSub s)       = f (switchNode s)
 traverseDest f (CoinInner c)       = f (coinNode c)
 traverseDest f (CoinOuter c)       = f (coinNode c)
+traverseDest f (FanSub    fan')    = traverseWeakNodes f (fanNodes fan')
 traverseDest _ (HoldSub {})        = return ()
 
 maxHeight :: Height -> Height -> Height
@@ -904,72 +916,9 @@ instance R.ReflexHost Ant where
 
 instance MonadRef AntHost where
   type Ref AntHost = Ref IO
-  {-# INLINE newRef #-}
-  {-# INLINE readRef #-}
-  {-# INLINE writeRef #-}
   newRef = liftIO . newRef
   readRef = liftIO . readRef
   writeRef r a = liftIO $ writeRef r a
-
-
-instance (Monoid a) => Monoid (Behavior a) where
-  mempty = constant mempty
-  mappend a b = pull $ liftM2 mappend (sample a) (sample b)
-  mconcat = pull . liftM mconcat . mapM sample
-
-instance (Semigroup a) => Monoid (Event a) where
-  mempty = never
-  mappend a b = mconcat [a, b]
-  mconcat = fmap sconcat . mergeList
-
-
-tag :: Behavior b -> Event a -> Event b
-tag b = pushAlways $ \_ -> sampleE b
-
-attachWith :: (a -> b -> c) -> Behavior a -> Event b -> Event c
-attachWith f b = pushAlways $ \x -> flip f x <$> sampleE b
-
-counter :: Event a -> EventM (Event Int)
-counter e = mdo
-  n <- hold 0 next
-
-  let next = attachWith (+) n (1 <$ e)
-  return next
-
-
-
-foldDyn :: (a -> b -> b) -> b -> Event a -> EventM (Event b, Behavior b)
-foldDyn f initial e = do
-  rec
-    let e' = flip pushAlways e $ \a -> f a <$> sampleE b
-    b <- hold initial e'
-
-  return (e', b)
-
-
-headE ::  Event  a -> EventM (Event a)
-headE e = do
-  rec be <- hold e $ fmap (const never) e'
-      let e' = switch be
-      e' `seq` return ()
-  return e'
-
-
-eventDMap :: [Event a] -> DMap (WrapArg Event (Const2 Int a))
-eventDMap es = fromAsc $ map (\(k, v) -> WrapArg (Const2 k) :=> v) $ zip [0 :: Int ..] es
-
-fromDMap :: DMap (Const2 Int a) -> [a]
-fromDMap = map (\(Const2 _ :=> v) -> v) . DMap.toList
-
-mergeWith :: (a -> a -> a) -> [Event a] -> Event a
-mergeWith f es =  foldl1 f <$> mergeList es
-
-mergeList ::  [Event a] -> Event (NonEmpty a)
-mergeList es = NE.fromList . fromDMap <$> merge (eventDMap es)
-
-leftmost :: [Event a] -> Event a
-leftmost = mergeWith const
-
 
 
 -- DMap utilities
@@ -994,5 +943,3 @@ toMaybe :: DSum (WrapArg Maybe k)  -> Maybe (DSum k)
 toMaybe (WrapArg k :=> Just v ) = Just (k :=> v)
 toMaybe _ = Nothing
 
-fromAsc :: [DSum k] -> DMap k
-fromAsc = DMap.fromDistinctAscList

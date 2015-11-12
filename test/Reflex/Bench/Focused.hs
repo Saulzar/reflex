@@ -9,6 +9,9 @@ import Control.Applicative
 import Data.Foldable
 import Data.Traversable
 
+import Data.Map (Map)
+import qualified Data.Map as Map
+
 import Data.List
 import Data.List.Split
 
@@ -38,6 +41,17 @@ events n  = plan $ (\i -> (i, i)) <$> [1..n]
 -- N events all originating from one event
 fmapFan :: Reflex t => Word -> Event t Word -> [Event t Word]
 fmapFan n e = (\i -> (+i) <$> e) <$> [1..n]
+
+-- Create an Event with a Map which is dense to size N
+denseMap :: TestPlan t m => Word -> m (Event t (Map Word Word))
+denseMap n = plan [(1, m)] where
+  m = Map.fromList $ zip [1..n] [1..n]
+
+-- Create an Event with a Map which is sparse, firing N events over M frames and Fan size S
+-- sparseMap ::
+-- sparseMap n frames size =   events frames
+--   occs = transpose $ chunksOf frames $ flip zip [1..n * frames] $ take (n * frames) $ concat (replicate [1..size])
+
 
 iterateN :: (a -> a) -> a -> Word -> a
 iterateN f a n = iterate f a !! fromIntegral n
@@ -82,6 +96,9 @@ sparseEvents n frames = do
     for firing $ \i -> plan [(frame, i)]
   where
     frameOccs = zip [1..] $ transpose $ chunksOf (fromIntegral frames) [1..n]
+
+
+
 
 
 counters :: TestPlan t m => Word -> Word -> m [Behavior t Int]
