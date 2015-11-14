@@ -77,16 +77,16 @@ newtype EventSelector k = EventSelector { select :: forall a. k a -> Event a }
 
 type Height = Int
 
-data Subscription a b where
-  PushSub   :: Node a -> Node b -> (a -> EventM (Maybe b)) -> Subscription a b
-  MergeSub  :: GCompare k => Merge k -> k a -> Subscription a (DMap k)
-  FanSub    :: GCompare k => Fan k -> Subscription (DMap k) (DMap k)
-  HoldSub   :: Node a -> Hold a -> Subscription a a
-  SwitchSub :: Switch a -> Subscription a a
-  CoinInner :: Coincidence a -> Subscription a a
-  CoinOuter :: Coincidence a -> Subscription (Event a) a
+data Subscription a where
+  PushSub   :: Node a -> Node b -> (a -> EventM (Maybe b)) -> Subscription a
+  MergeSub  :: GCompare k => Merge k -> k a -> Subscription a
+  FanSub    :: GCompare k => Fan k -> Subscription (DMap k)
+  HoldSub   :: Node a -> Hold a -> Subscription a
+  SwitchSub :: Switch a -> Subscription a
+  CoinInner :: Coincidence a -> Subscription a
+  CoinOuter :: Coincidence a -> Subscription (Event a)
 
-instance Show (Subscription a b) where
+instance Show (Subscription a) where
   show (PushSub   {}) = "Push"
   show (MergeSub  {}) = "Merge"
   show (HoldSub   {}) = "Hold"
@@ -97,17 +97,15 @@ instance Show (Subscription a b) where
 
 
 data Subscribing b where
-  Subscribing       :: (Subscription a b) -> Subscribing b
+  Subscribing       :: Subscription a -> Subscribing b
   SubscribingMerge  :: (Merge k) -> Subscribing (DMap k)
   SubscribingSwitch :: (Switch a) -> Subscribing a
   SubscribingCoin   :: (Coincidence a) -> Subscribing a
   SubscribingRoot   :: Subscribing b
   SubscribingFan    :: Fan k -> k a -> Subscribing a
 
-data WeakSubscriber a = forall b. WeakSubscriber { unWeak :: !(Weak (Subscription a b)) }
-
 data Node a = Node
-  { nodeSubs      :: !(IORef [WeakSubscriber a])
+  { nodeSubs      :: !(IORef [Weak (Subscription a)])
   , nodeHeight    :: !(IORef Int)
   , nodeParents   :: (Subscribing a)
   , nodeOcc     :: !(IORef (Maybe a))
@@ -129,14 +127,14 @@ data Pull a  = Pull
 data Hold a = Hold
   { holdInvs     :: !(IORef [Weak Invalidator])
   , holdValue    :: !(IORef a)
-  , holdSub      :: !(LazyRef (Event a) (Maybe (Subscription a a)))
+  , holdSub      :: !(LazyRef (Event a) (Maybe (Subscription a)))
   }
 
-type NodeSub a = (Node a, Weak (Subscription a a))
+type NodeSub a = (Node a, Weak (Subscription a))
 
 data Switch a = Switch
   { switchNode   :: Node a
-  , switchSub    :: Subscription a a
+  , switchSub    :: Subscription a
   , switchConn   :: !(IORef (Maybe (NodeSub a)))
   , switchInv    :: Invalidator
   , switchSource :: Behavior (Event a)
@@ -145,13 +143,13 @@ data Switch a = Switch
 data Coincidence a = Coincidence
   { coinNode     :: Node a
   , coinParent   :: Node (Event a)
-  , coinOuterSub :: Subscription (Event a) a
-  , coinInnerSub :: Subscription a a
+  , coinOuterSub :: Subscription (Event a)
+  , coinInnerSub :: Subscription a
   }
 
 
 data MergeParent k a where
-  MergeParent      :: Node a -> (Subscription a (DMap k)) -> MergeParent k a
+  MergeParent      :: Node a -> (Subscription a) -> MergeParent k a
 
 data Merge k = Merge
   { mergeNode     :: Node (DMap k)
@@ -163,7 +161,7 @@ newtype WeakNode a = WeakNode { unWeakNode :: Weak (Node a) }
 
 data Fan k  = Fan
   { fanParent   :: Node (DMap k)
-  , fanSub      :: Subscription (DMap k) (DMap k)
+  , fanSub      :: Subscription (DMap k)
   , fanNodes    :: IORef (DMap (WrapArg WeakNode k))
   }
 
@@ -269,13 +267,13 @@ readEvent :: EventHandle a -> IO (Maybe a)
 readEvent (EventHandle n) = join <$> traverse readNode n
 
 
-subscribe :: MonadIORef m => Node a -> Subscription a b -> m (Weak (Subscription a b))
+subscribe :: MonadIORef m => Node a -> Subscription a -> m (Weak (Subscription a))
 subscribe node sub = liftIO $ do
   weakSub <- mkWeakPtr sub Nothing
-  modifyRef (nodeSubs node) (WeakSubscriber weakSub :)
+  modifyRef (nodeSubs node) (weakSub :)
   return weakSub
 
-subscribe_ :: MonadIORef m => Node a -> Subscription a b -> m ()
+subscribe_ :: MonadIORef m => Node a -> Subscription a -> m ()
 subscribe_ node = void . subscribe node
 
 createNode :: MakeNode a -> EventM (Node a)
@@ -615,9 +613,9 @@ makeRoot k (Root nodes subscr) = liftIO $ lookupFan nodes k $ do
   return (node, Just finalizer)
 
 
-traverseWeakSubs :: MonadIORef m => (forall b. Subscription a b -> m ()) -> [WeakSubscriber a] -> m [WeakSubscriber a]
+traverseWeakSubs :: MonadIORef m => (Subscription a -> m ()) -> [Weak (Subscription a)] -> m [Weak (Subscription a)]
 traverseWeakSubs f subs = do
-  flip filterM subs $ \(WeakSubscriber weak) -> do
+  flip filterM subs $ \weak -> do
     m <- liftIO (deRefWeak weak)
     case m of
       Nothing  -> return False
@@ -628,14 +626,14 @@ traverseWeakSubs f subs = do
 -- result in changes to the subscriber list!
 -- In which case we need to be very careful not to lose any new subscriptions
 
-traverseSubs :: MonadIORef m =>  (forall b. Subscription a b -> m ()) -> Node a -> m ()
+traverseSubs :: MonadIORef m =>  (Subscription a -> m ()) -> Node a -> m ()
 traverseSubs f node = do
   subs  <- takeRef (nodeSubs node)
   subs' <- traverseWeakSubs f subs
   modifyRef (nodeSubs node) (++subs')
 
 
-forSubs :: MonadIORef m =>  Node a -> (forall b. Subscription a b -> m ()) -> m ()
+forSubs :: MonadIORef m =>  Node a -> (Subscription a -> m ()) -> m ()
 forSubs node f = traverseSubs f node
 
 
@@ -672,7 +670,7 @@ writePropagate  height node value = do
 propagate :: forall a. Height -> Node a -> a -> EventM ()
 propagate  height node value = traverseSubs propagate' node where
 
-  propagate' :: Subscription a b -> EventM ()
+  propagate' :: Subscription a -> EventM ()
   propagate' (PushSub _ dest f)  = f value >>= traverse_ (writePropagate height dest)
   propagate' (MergeSub m k) = do
     partial <- readRef (mergePartial m)
@@ -747,7 +745,7 @@ propagateHeight newHeight node = do
       MergeSub (Merge dest _ _)  _ -> propagateHeight (succ newHeight) dest
       sub -> traverseDest (propagateHeight newHeight) sub
 
-traverseDest :: MonadIORef m => (forall c. Node c -> m ()) -> Subscription a b -> m ()
+traverseDest :: MonadIORef m => (forall b. Node b -> m ()) -> Subscription a -> m ()
 traverseDest f (MergeSub  m _)     = f (mergeNode m)
 traverseDest f (PushSub  _ node _) = f node
 traverseDest f (SwitchSub s)       = f (switchNode s)
@@ -834,13 +832,6 @@ fireEventsAndRead triggers runRead = do
 
 fireEvents :: [DSum Trigger] -> IO ()
 fireEvents triggers = fireEventsAndRead triggers (return ())
-
-
-instance Functor Event where
-  fmap f e = push (return .   Just . f) e
-
-instance Functor Behavior where
-  fmap f b = pull (f <$> sample b)
 
 
 data Ant
