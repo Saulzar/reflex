@@ -105,22 +105,32 @@ counters :: TestPlan t m => Word -> Word -> m [Behavior t Int]
 counters n frames = traverse (fmap current . count) =<< sparseEvents n frames
 
 
+-- Given a function which creates a sub-network (from a single event)
+-- Create a plan which uses a switch to substitute it
+switches :: TestPlan t m => Word -> (forall m. MonadHold t m => Event t Word -> m (Event t a)) -> m (Event t a)
+switches numFrames f = do
+  es <- events numFrames
+  switch <$> hold never (makeEvents es)
+
+    where
+      makeEvents es =  pushAlways (\n -> f (fmap (+n) es)) es
+
 -- Two sets of benchmarks, one which we're interested in testing subscribe time (as well as time to fire frames)
 -- the other, which we're only interested in time for running frames
-subscribeBench :: Word -> [(String, TestCase)]
-subscribeBench n =
-  [ testE "fmapFan merge"       $ mergeList . fmapFan n <$> event
-  , testE "fmapFan/mergeTree 8" $ mergeTree 8 . fmapFan n <$> event
-  , testE "fmapChain"           $ fmapChain n <$> event
-  , testE "switchChain"         $ switchChain n =<< event
-  , testE "switchPromptlyChain" $ switchPromptlyChain n =<< event
-  , testE "switchFactors"       $ switchFactors n =<< fmap (+1) <$> events 4
-  , testE "coincidenceChain"    $ coinChain n <$> event
+subscribing :: Word -> Word -> [(String, TestCase)]
+subscribing n frames =
+  [ testE "fmapFan merge"       $ switches frames (return . mergeList . fmapFan n)
+  , testE "fmapFan/mergeTree 8" $ switches frames (return . mergeTree 8 . fmapFan n)
+  , testE "fmapChain"           $ switches frames (return . fmapChain n)
+  , testE "switchChain"         $ switches frames (switchChain n)
+  , testE "switchPromptlyChain" $ switches frames (switchPromptlyChain n)
+  , testE "switchFactors"       $ switches frames (switchFactors n)
+  , testE "coincidenceChain"    $ switches frames (return . coinChain n)
   ]
 
 
-firingBench :: Word -> [(String, TestCase)]
-firingBench n =
+firing :: Word -> [(String, TestCase)]
+firing n =
   [ testE "dense mergeTree 8"      $ mergeTree 8 <$> denseEvents n
   , testE "sparse 10/mergeTree 8"  $ mergeTree 8 <$> sparseEvents n 10
   , testE "runFrame"               $ events n

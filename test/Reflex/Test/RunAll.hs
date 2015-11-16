@@ -13,8 +13,8 @@ import Prelude
 main :: IO ()
 main = runTests $
   Micro.testCases ++
-  Focused.subscribeBench 1000 ++
-  Focused.firingBench 1000
+  Focused.subscribing 1000 4 ++
+  Focused.firing 1000
 
 
 

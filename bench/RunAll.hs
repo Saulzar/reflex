@@ -27,6 +27,7 @@ import Data.Bifunctor
 import Data.IORef
 import Control.Monad.Ref
 
+import System.Mem
 import Prelude
 
 type MonadReflexHost' t m = (MonadReflexHost t m, MonadIORef m, MonadIORef (HostFrame t))
@@ -58,41 +59,26 @@ instance NFData (Firing t) where
 -- Measure the running time
 benchFiring ::  (MonadReflexHost' t m) => (forall a. m a -> IO a) -> (String, TestCase) -> Benchmark
 benchFiring runHost (name, TestE plan) = env setup (\e -> bench name $ whnfIO $ run e) where
-    run (Ignore h, s) = runHost $ readSchedule s (readEvent' h)
+    run (Ignore h, s) = runHost (readSchedule s (readEvent' h))
     setup = runHost $ setupFiring plan
 
 benchFiring runHost (name, TestB plan) = env setup (\e -> bench name $ whnfIO $ run e) where
-    run (b, s) = runHost $ readSchedule s (sample b)
+    run (b, s) = runHost (readSchedule s (sample b))
     setup = runHost $ second makeDense <$> runPlan plan
 
 
-benchSubscribe :: (MonadSample t m, MonadReflexHost' t m) => (forall a. m a -> IO a) -> (String, TestCase) -> Benchmark
-benchSubscribe runHost (name, TestE plan) = bench name $ whnfIO $ runHost $
-  fst <$> runPlan plan >>= subscribeEvent
-
-benchSubscribe runHost (name, TestB plan) = bench name $ whnfIO $ runHost $
-  fst <$> runPlan plan >>= sample
-
-benchAllFiring ::  (String, TestCase) -> Benchmark
-benchAllFiring (name, test) = bgroup name
+benchAll ::  (String, TestCase) -> Benchmark
+benchAll (name, test) = bgroup name
   [ benchFiring runSpiderHost ("spider", test)
   , benchFiring runAntHost ("ant", test)
   ]
 
 
-benchAllSubscribe ::  (String, TestCase) -> Benchmark
-benchAllSubscribe (name, test) = bgroup name
-  [ benchSubscribe runSpiderHost ("spider", test)
-  , benchSubscribe runAntHost ("ant", test)
-  ]
-
 benchmarks :: Word ->  [Benchmark]
 benchmarks n =
-  [ bgroup ("subscribe " ++ show n) $ benchAllSubscribe <$> subs
-  , bgroup ("firing " ++ show n) $ benchAllFiring <$>  (subs ++ firing)
+  [ bgroup ("subscribing " ++ show n) $ benchAll <$> Focused.subscribing n 4
+  , bgroup ("firing " ++ show n) $ benchAll <$>  Focused.firing n
   ]
-    where subs = Focused.subscribeBench n
-          firing = Focused.firingBench n
 
 
 main :: IO ()

@@ -36,8 +36,8 @@ import Data.Dependent.Map (DMap)
 import Data.Dependent.Sum
 import Data.GADT.Compare
 
-import Data.IntMap.Strict (IntMap)
-import qualified Data.IntMap.Strict as IntMap
+import Data.IntMap (IntMap)
+import qualified Data.IntMap as IntMap
 
 import Data.IORef
 import System.Mem.Weak
@@ -45,7 +45,7 @@ import System.IO.Unsafe
 import Unsafe.Coerce
 
 data MakeNode a where
-  MakeNode        :: NodeRef a -> (a -> EventM (Maybe b)) -> MakeNode b
+  MakePush        :: NodeRef a -> (a -> EventM (Maybe b)) -> MakeNode b
   MakeSwitch      :: Behavior (Event a) -> MakeNode a
   MakeCoincidence :: !(NodeRef (Event a)) -> MakeNode a
   MakeRoot        :: GCompare k => k a -> Root k -> MakeNode a
@@ -54,8 +54,9 @@ data MakeNode a where
 
 
 type LazyRef a b = IORef (Either a b)
-newtype NodeRef a = NodeRef (LazyRef (MakeNode a) (Node a))
 
+type LazyNode a = LazyRef (MakeNode a) (Node a)
+newtype NodeRef a = NodeRef (LazyNode a)
 
 type FanRef  k = LazyRef (NodeRef (DMap k)) (Fan k)
 type PullRef a = LazyRef (BehaviorM a) (Pull a)
@@ -76,12 +77,13 @@ newtype EventHandle a = EventHandle { unEventHandle :: Maybe (Node a) }
 newtype EventSelector k = EventSelector { select :: forall a. k a -> Event a }
 
 type Height = Int
+type Key = Int
 
 data Subscription a where
-  PushSub   :: Node a -> Node b -> (a -> EventM (Maybe b)) -> Subscription a
+  PushSub   :: Push a b -> Subscription a
   MergeSub  :: GCompare k => Merge k -> k a -> Subscription a
   FanSub    :: GCompare k => Fan k -> Subscription (DMap k)
-  HoldSub   :: Node a -> Hold a -> Subscription a
+  HoldSub   :: Hold a -> Subscription a
   SwitchSub :: Switch a -> Subscription a
   CoinInner :: Coincidence a -> Subscription a
   CoinOuter :: Coincidence a -> Subscription (Event a)
@@ -97,18 +99,19 @@ instance Show (Subscription a) where
 
 
 data Subscribing b where
-  Subscribing       :: Subscription a -> Subscribing b
-  SubscribingMerge  :: (Merge k) -> Subscribing (DMap k)
-  SubscribingSwitch :: (Switch a) -> Subscribing a
-  SubscribingCoin   :: (Coincidence a) -> Subscribing a
-  SubscribingRoot   :: Subscribing b
+  SubscribingPush   :: Push a b -> Subscribing b
+  SubscribingMerge  :: Merge k -> Subscribing (DMap k)
+  SubscribingSwitch :: Switch a -> Subscribing a
+  SubscribingCoin   :: Coincidence a -> Subscribing a
   SubscribingFan    :: Fan k -> k a -> Subscribing a
+  SubscribingRoot   :: Maybe (IO ()) -> Subscribing b
 
 data Node a = Node
-  { nodeSubs      :: !(IORef [Weak (Subscription a)])
+  { nodeSubs      :: !(IORef (IntMap (Subscription a)))
   , nodeHeight    :: !(IORef Int)
   , nodeParents   :: (Subscribing a)
-  , nodeOcc     :: !(IORef (Maybe a))
+  , nodeOcc       :: !(IORef (Maybe a))
+  , nodeHandle    :: !(Weak (LazyNode a))
   }
 
 
@@ -116,6 +119,12 @@ data Invalidator where
   PullInv   :: Pull a   -> Invalidator
   SwitchInv :: Switch a -> Invalidator
 
+
+data Push a b = Push
+  { pushNode    :: Node b
+  , pushParent  :: NodeSub a
+  , pushCompute :: a -> EventM (Maybe b)
+  }
 
 data Pull a  = Pull
   { pullInv     :: Invalidator
@@ -127,14 +136,13 @@ data Pull a  = Pull
 data Hold a = Hold
   { holdInvs     :: !(IORef [Weak Invalidator])
   , holdValue    :: !(IORef a)
-  , holdSub      :: !(LazyRef (Event a) (Maybe (Subscription a)))
+  , holdSub      :: !(LazyRef (Event a) (Maybe (NodeSub a)))
   }
 
-type NodeSub a = (Node a, Weak (Subscription a))
+data NodeSub a = NodeSub !(Node a) !Key
 
 data Switch a = Switch
   { switchNode   :: Node a
-  , switchSub    :: Subscription a
   , switchConn   :: !(IORef (Maybe (NodeSub a)))
   , switchInv    :: Invalidator
   , switchSource :: Behavior (Event a)
@@ -142,31 +150,24 @@ data Switch a = Switch
 
 data Coincidence a = Coincidence
   { coinNode     :: Node a
-  , coinParent   :: Node (Event a)
-  , coinOuterSub :: Subscription (Event a)
-  , coinInnerSub :: Subscription a
+  , coinParent   :: NodeSub (Event a)
   }
 
-
-data MergeParent k a where
-  MergeParent      :: Node a -> (Subscription a) -> MergeParent k a
 
 data Merge k = Merge
   { mergeNode     :: Node (DMap k)
-  , mergeParents  :: DMap (WrapArg (MergeParent k) k)
+  , mergeParents  :: DMap (WrapArg NodeSub k)
   , mergePartial  :: !(IORef (DMap k))
   }
 
-newtype WeakNode a = WeakNode { unWeakNode :: Weak (Node a) }
 
 data Fan k  = Fan
-  { fanParent   :: Node (DMap k)
-  , fanSub      :: Subscription (DMap k)
-  , fanNodes    :: IORef (DMap (WrapArg WeakNode k))
+  { fanParent   :: NodeSub (DMap k)
+  , fanNodes    :: IORef (DMap (WrapArg Node k))
   }
 
 data Root k  = Root
-  { rootNodes :: IORef (DMap (WrapArg WeakNode k))
+  { rootNodes :: IORef (DMap (WrapArg Node k))
   , rootInit  :: (forall a. k a -> Trigger a -> IO (IO ()))
   }
 
@@ -236,7 +237,7 @@ readLazy create ref = readRef ref >>= \case
     Right node -> return node
 
 readNodeRef :: NodeRef a -> EventM (Node a)
-readNodeRef (NodeRef ref) = readLazy createNode ref
+readNodeRef r@(NodeRef ref) = readLazy (createNode r) ref
 
 
 eventNode :: Event a -> EventM (Maybe (Node a))
@@ -248,9 +249,16 @@ readHeight :: MonadIORef m => Node a -> m Int
 readHeight node = readRef (nodeHeight node)
 
 
-newNode :: MonadIO m => Height -> Subscribing a -> m (Node a)
-newNode height parents = liftIO $
-  Node <$> newRef [] <*> newRef height <*> pure parents <*> newRef Nothing
+newNode :: MonadIO m => NodeRef a -> Height -> Subscribing a -> m (Node a)
+newNode (NodeRef ref) height parents = liftIO $ do
+  rec
+    node <- Node <$> newRef mempty <*> newRef height <*> pure parents <*> newRef Nothing <*> mkWeakIORef ref (finalizer node)
+  return node
+
+  where
+    finalizer node = do
+      subs <- readRef (nodeSubs node)
+      when (null subs) $ unsubscribeNode parents
 
 
 readNode :: MonadIORef m => Node a -> m (Maybe a)
@@ -267,22 +275,52 @@ readEvent :: EventHandle a -> IO (Maybe a)
 readEvent (EventHandle n) = join <$> traverse readNode n
 
 
-subscribe :: MonadIORef m => Node a -> Subscription a -> m (Weak (Subscription a))
-subscribe node sub = liftIO $ do
-  weakSub <- mkWeakPtr sub Nothing
-  modifyRef (nodeSubs node) (weakSub :)
-  return weakSub
+subscribe :: MonadIORef m => Node a -> Subscription a -> m (NodeSub a)
+subscribe node sub = do
+  subs <- readRef (nodeSubs node)
+  let k = next subs
+  writeRef (nodeSubs node) (IntMap.insert k sub subs)
+  return (NodeSub node k)
 
-subscribe_ :: MonadIORef m => Node a -> Subscription a -> m ()
-subscribe_ node = void . subscribe node
+  where
+    next m | null m    = 0
+           | otherwise = succ (fst (IntMap.findMax m))
 
-createNode :: MakeNode a -> EventM (Node a)
-createNode (MakeNode ref f)      = makePush ref f
-createNode (MakeMerge refs)      = makeMerge refs
-createNode (MakeSwitch b)        = makeSwitch b
-createNode (MakeCoincidence ref) = makeCoincidence ref
-createNode (MakeRoot root k)     = makeRoot root k
-createNode (MakeFan k f)       = makeFanNode f k
+
+unsubscribeNode :: Subscribing a -> IO ()
+unsubscribeNode (SubscribingPush p) = unsubscribe (pushParent p)
+unsubscribeNode (SubscribingSwitch s) = do
+  conn <- readRef (switchConn s)
+  traverse_ unsubscribe conn
+
+unsubscribeNode (SubscribingCoin c) = unsubscribe (coinParent c)
+unsubscribeNode (SubscribingRoot finalizer) = sequence_ finalizer
+
+unsubscribeNode (SubscribingFan _ _) = error "not implemented yet"
+
+unsubscribeNode (SubscribingMerge m) = traverse_ unsub (DMap.toList $ mergeParents m)
+  where
+    unsub :: forall k. DSum (WrapArg NodeSub k) -> IO ()
+    unsub (WrapArg _ :=> sub) = unsubscribe sub
+
+
+unsubscribe :: NodeSub a -> IO ()
+unsubscribe (NodeSub node key) = do
+  subs <- readRef (nodeSubs node)
+  let subs' = IntMap.delete key subs
+  writeRef (nodeSubs node) subs'
+
+  when (null subs') $ do
+    m <- deRefWeak (nodeHandle node)
+    when (isNothing m) $ unsubscribeNode (nodeParents node)
+
+createNode :: NodeRef a -> MakeNode a -> EventM (Node a)
+createNode self  (MakePush ref f)      = makePush self ref f
+createNode self (MakeMerge refs)      = makeMerge self refs
+createNode self (MakeSwitch b)        = makeSwitch self b
+createNode self (MakeCoincidence ref) = makeCoincidence self ref
+createNode self (MakeFan k f)         = makeFanNode self f k
+createNode self (MakeRoot root k)     = makeRoot self root k
 
 constant :: a -> Behavior a
 constant = Constant
@@ -301,10 +339,8 @@ initHold (HoldInit h) = void $ readLazy createHold (holdSub h) where
     value <- readNode parent
     traverse_ (delayHold h) value
 
-    let sub = HoldSub parent h
-    subscribe_ parent sub
+    Just <$> subscribe parent (HoldSub h)
 
-    return (Just sub)
 
 
 pull :: BehaviorM a -> Behavior a
@@ -357,28 +393,26 @@ coincidence :: Event (Event a) -> Event a
 coincidence Never = Never
 coincidence (Event ref) = unsafeCreateEvent (MakeCoincidence ref)
 
-makeCoincidence :: forall a. NodeRef (Event a) -> EventM (Node a)
-makeCoincidence ref = do
+makeCoincidence :: forall a. NodeRef a -> NodeRef (Event a) -> EventM (Node a)
+makeCoincidence self ref = do
   parent <- readNodeRef ref
   height <- readHeight parent
 
   rec
-    let c = Coincidence node parent outerSub innerSub
-        outerSub = CoinOuter c
-        innerSub = CoinInner c
-    node <- newNode height (SubscribingCoin c)
+    let c = Coincidence node sub
+    sub  <- subscribe parent (CoinOuter c)
+    node <- newNode self height (SubscribingCoin c)
 
-  subscribe_ parent outerSub
   readNode parent >>= traverse_ (connectC c)
   return node
 
 
 connectC :: Coincidence a -> Event a -> EventM (Maybe a)
 connectC _ Never = return Nothing
-connectC (Coincidence node parent _ innerSub) (Event ref) = do
+connectC c@(Coincidence node _) (Event ref) = do
   inner       <- readNodeRef ref
   innerHeight <- readHeight inner
-  height      <- readHeight parent
+  height      <- readHeight node
 
   value <- readNode inner
   case value of
@@ -388,8 +422,8 @@ connectC (Coincidence node parent _ innerSub) (Event ref) = do
     -- Yet to occur, subscribe the event, record the susbcription as a CoincidenceOcc
     -- and adjust our height
     Nothing -> when (innerHeight >= height) $ do
-      weakSub <- subscribe inner innerSub
-      askModifyRef envCoincidences (CoincidenceOcc (inner, weakSub):)
+      sub <- subscribe inner (CoinInner c)
+      askModifyRef envCoincidences (CoincidenceOcc sub :)
       liftIO $ propagateHeight innerHeight node
   return value
 
@@ -400,28 +434,30 @@ switch :: Behavior (Event a) -> Event a
 switch (Constant e) = e
 switch b = unsafeCreateEvent (MakeSwitch b)
 
-makeSwitch ::  Behavior (Event a) -> EventM (Node a)
-makeSwitch source =  do
+
+
+makeSwitch :: NodeRef a -> Behavior (Event a) -> EventM (Node a)
+makeSwitch self source =  do
   connRef <- newRef Nothing
+
   rec
-    let s   = Switch node sub connRef inv source
+    let s   = Switch node connRef inv source
         inv = SwitchInv s
-        sub = SwitchSub s
-    node <- newNode 0 (SubscribingSwitch s)
+    node <- newNode self 0 (SubscribingSwitch s)
 
   writeRef (nodeHeight node)  =<< connect s
   return node
 
 connect :: Switch a -> EventM Height
-connect (Switch node sub connRef inv source) = do
+connect s@(Switch node connRef inv source) = do
   e <- liftIO $ runBehaviorM (sample source) inv
   case e of
-    Never       -> 0 <$ writeRef connRef Nothing
+    Never     -> 0 <$ writeRef connRef Nothing
     Event ref -> do
       parent <- readNodeRef ref
-      weakSub <- subscribe parent sub
+      sub <- subscribe parent (SwitchSub s)
 
-      writeRef connRef (Just (parent, weakSub))
+      writeRef connRef (Just sub)
       readNode parent >>= traverse_ (writeNode node)
       readHeight parent
 
@@ -439,43 +475,41 @@ reconnect :: Connect -> IO ()
 reconnect (Connect s) = do
   -- Forcibly disconnect any existing connection
   conn <- readRef (switchConn s)
-  traverse_ (finalize . snd) conn
+  traverse_ unsubscribe conn
 
   height <- evalEventM $ connect s
   propagateHeight height (switchNode s)
 
 
 
-disconnectC :: CoincidenceOcc -> IO ()
-disconnectC (CoincidenceOcc (_, weakSub)) = finalize weakSub
-
 connectSwitches :: [Connect] -> [CoincidenceOcc] -> IO ()
 connectSwitches connects coincidences = do
-  traverse_ disconnectC coincidences
+  traverse_ (\(CoincidenceOcc sub) -> unsubscribe sub) coincidences
   traverse_ reconnect connects
 
 
 
 push :: (a -> EventM (Maybe b)) -> Event a -> Event b
 push _ Never = Never
-push f (Event ref) = unsafeCreateEvent $ MakeNode ref f
+push f (Event ref) = unsafeCreateEvent $ MakePush ref f
 
 pushAlways :: (a -> EventM b) -> Event a -> Event b
 pushAlways f = push (fmap Just . f)
 
 
-makePush :: NodeRef a -> (a -> EventM (Maybe b)) -> EventM (Node b)
-makePush ref f =  do
+makePush :: NodeRef b -> NodeRef a -> (a -> EventM (Maybe b)) -> EventM (Node b)
+makePush self ref f =  do
   parent <- readNodeRef ref
   height <- readHeight parent
   rec
-    let sub = PushSub parent node f
-    node <- newNode height (Subscribing sub)
+
+    let p = Push node sub f
+    sub <- subscribe parent (PushSub p)
+    node <- newNode self height (SubscribingPush p)
 
   m <- readNode parent
   traverse_ (f >=> traverse_ (writeNode node)) m
 
-  subscribe_ parent sub
   return node
 
 
@@ -485,23 +519,22 @@ merge events = case catEvents (DMap.toAscList events) of
   refs -> unsafeCreateEvent (MakeMerge refs)
 
 
-mergeSubscribing :: GCompare k =>  Merge k -> DSum (WrapArg Node k) -> IO (DSum (WrapArg (MergeParent k) k))
-mergeSubscribing  merge' (WrapArg k :=> parent) = do
-  subscribe_ parent sub
-  return (WrapArg k :=> MergeParent parent sub)
-    where sub = MergeSub merge' k
+mergeSubscribing :: GCompare k =>  Merge k -> DSum (WrapArg Node k) -> IO (DSum (WrapArg NodeSub k))
+mergeSubscribing  m (WrapArg k :=> parent) = do
+  sub <- subscribe parent (MergeSub m k)
+  return (WrapArg k :=> sub)
 
 
-makeMerge :: GCompare k =>  [DSum (WrapArg NodeRef k)] -> EventM (Node (DMap k))
-makeMerge refs = do
+makeMerge :: GCompare k => NodeRef (DMap k) -> [DSum (WrapArg NodeRef k)] -> EventM (Node (DMap k))
+makeMerge self refs = do
   parents <- traverseDSums readNodeRef refs
   height <- maximumHeight <$> sequence (mapDSums readHeight parents)
   values <- catDSums <$> traverseDSums readNode parents
 
   rec
-    subs   <- liftIO $ traverse (mergeSubscribing merge') parents
-    merge' <- Merge node (DMap.fromDistinctAscList subs) <$> newRef DMap.empty
-    node <- newNode (succ height) (SubscribingMerge merge')
+    subs   <- liftIO $ traverse (mergeSubscribing m) parents
+    m <- Merge node (DMap.fromDistinctAscList subs) <$> newRef DMap.empty
+    node <- newNode self (succ height) (SubscribingMerge m)
 
   when (not  . null  $ values) $ writeNode node (DMap.fromDistinctAscList values)
   return node
@@ -521,69 +554,41 @@ makeFan :: GCompare k => NodeRef (DMap k) -> EventM (Fan k)
 makeFan ref = do
   parent <- readNodeRef ref
   rec
-    let sub = FanSub fan'
-    fan' <- Fan parent sub <$> newRef DMap.empty
+    sub  <- subscribe parent (FanSub f)
+    f <- Fan sub <$> newRef DMap.empty
 
-  subscribe_ parent sub
-  return fan'
-
-lookupWeakNode :: GCompare k =>  DMap (WrapArg WeakNode k) -> k a -> IO (Maybe (Node a))
-lookupWeakNode nodes k = case DMap.lookup (WrapArg k) nodes of
-  Nothing              -> return Nothing
-  Just (WeakNode node) -> deRefWeak node
-
-traverseWeakNode :: (MonadIORef m) => (Node a -> m ()) -> WeakNode a -> m ()
-traverseWeakNode f (WeakNode node) = liftIO (deRefWeak node) >>= traverse_ f
+  return f
 
 
-traverseWeakNodes :: forall m k. (MonadIORef m) => (forall a. Node a -> m ()) -> IORef (DMap (WrapArg WeakNode k)) -> m ()
-traverseWeakNodes f nodesRef = do
+traverseNodes :: forall m k. (MonadIORef m) => (forall a. Node a -> m ()) -> IORef (DMap (WrapArg Node k)) -> m ()
+traverseNodes f nodesRef = do
   nodes <- readRef nodesRef
   for_ (DMap.toList nodes) traverseNode'
 
   where
-    traverseNode' :: DSum (WrapArg WeakNode k) -> m ()
-    traverseNode' (WrapArg _ :=> node) = traverseWeakNode f node
-
-traverseNode :: (GCompare k, MonadIORef m) => DMap (WrapArg WeakNode k) -> k a -> (Node a -> m ()) -> m ()
-traverseNode nodes k f = traverse_ (traverseWeakNode f) (DMap.lookup (WrapArg k) nodes)
+    traverseNode' :: DSum (WrapArg Node k) -> m ()
+    traverseNode' (WrapArg _ :=> node) = f node
 
 
--- Check that the key is still valid (otherwise remove it)
--- Runs as a finalizer for fan nodes
-cleanKey :: GCompare k => IORef (DMap (WrapArg WeakNode k)) -> k a -> IO ()
-cleanKey nodesRef k = do
-  nodes <- readRef nodesRef
-  for_ (DMap.lookup (WrapArg k) nodes) $ \(WeakNode node) -> do
-    m <- deRefWeak node
-    when (isNothing m) $ do
-      writeRef nodesRef (DMap.delete (WrapArg k) nodes)
-
--- Lookup a weak node cache, and create it if it doesn't exist (or has been GC'ed)
-lookupFan :: (GCompare k, MonadIORef m) => IORef (DMap (WrapArg WeakNode k)) -> k a -> m (Node a, Maybe (IO ())) -> m (Node a)
+lookupFan :: (GCompare k, MonadIORef m) => IORef (DMap (WrapArg Node k)) -> k a -> m (Node a) -> m (Node a)
 lookupFan nodesRef k create = do
   nodes     <- readRef nodesRef
-  maybeNode <- liftIO (lookupWeakNode nodes k)
-
-  case maybeNode of
+  case (DMap.lookup (WrapArg k) nodes) of
     Just node -> return node
     Nothing   -> do
-      (node, finalizer)  <- create
-      liftIO $ do
-        weakNode <- WeakNode <$> mkWeakPtr node finalizer
-        writeRef nodesRef (DMap.insert (WrapArg k) weakNode nodes)
-        return node
+      node  <- create
+      writeRef nodesRef (DMap.insert (WrapArg k) node nodes)
+      return node
 
 
-
-makeFanNode :: GCompare k => FanRef k -> k a -> EventM (Node a)
-makeFanNode fanRef k = do
-  f@(Fan parent _ nodes) <- readLazy makeFan fanRef
+makeFanNode :: GCompare k => NodeRef a -> FanRef k -> k a -> EventM (Node a)
+makeFanNode self fanRef k = do
+  f@(Fan (NodeSub parent _) nodes) <- readLazy makeFan fanRef
   lookupFan nodes k $ do
     height <- readHeight parent
-    node <- newNode height (SubscribingFan f k)
+    node <- newNode self height (SubscribingFan f k)
     readNode parent >>= traverse_ (writeOcc node)
-    return (node, Nothing)
+    return node
 
   where
     writeOcc node occ = traverse_ (writeNode node) (DMap.lookup k occ)
@@ -591,8 +596,9 @@ makeFanNode fanRef k = do
 
 newEventWithFire :: IO (Event a, a -> DSum Trigger)
 newEventWithFire = do
-  node  <- newNode 0 SubscribingRoot
-  nodeRef  <- NodeRef <$> newIORef (Right node)
+  rec
+    node  <- newNode nodeRef 0 (SubscribingRoot Nothing)
+    nodeRef  <- NodeRef <$> newIORef (Right node)
   return (Event nodeRef, (Trigger node :=>))
 
 newFanEventWithTrigger :: forall k. GCompare k => (forall a. k a -> Trigger a -> IO (IO ())) -> IO (EventSelector k)
@@ -606,20 +612,13 @@ newEventWithTrigger f = do
   es <- newFanEventWithTrigger $ \Refl -> f
   return $ select es Refl
 
-makeRoot :: GCompare k => k a -> Root k -> EventM (Node a)
-makeRoot k (Root nodes subscr) = liftIO $ lookupFan nodes k $ do
-  node       <- newNode 0 SubscribingRoot
-  finalizer  <- subscr  k (Trigger node)
-  return (node, Just finalizer)
+makeRoot :: GCompare k => NodeRef a -> k a -> Root k -> EventM (Node a)
+makeRoot self k (Root nodes subscr) = liftIO $ lookupFan nodes k $ do
+  rec
+    node       <- newNode self 0 (SubscribingRoot (Just finalizer))
+    finalizer  <- subscr  k (Trigger node)
+  return node
 
-
-traverseWeakSubs :: MonadIORef m => (Subscription a -> m ()) -> [Weak (Subscription a)] -> m [Weak (Subscription a)]
-traverseWeakSubs f subs = do
-  flip filterM subs $ \weak -> do
-    m <- liftIO (deRefWeak weak)
-    case m of
-      Nothing  -> return False
-      Just sub -> True <$ f sub
 
 
 -- Be careful to read the subscriber list atomically, in case the actions run on the subscriber
@@ -628,14 +627,11 @@ traverseWeakSubs f subs = do
 
 traverseSubs :: MonadIORef m =>  (Subscription a -> m ()) -> Node a -> m ()
 traverseSubs f node = do
-  subs  <- takeRef (nodeSubs node)
-  subs' <- traverseWeakSubs f subs
-  modifyRef (nodeSubs node) (++subs')
-
+  subs  <- readRef (nodeSubs node)
+  traverse_ f subs
 
 forSubs :: MonadIORef m =>  Node a -> (Subscription a -> m ()) -> m ()
 forSubs node f = traverseSubs f node
-
 
 modifyM :: MonadRef m => Ref m a -> (a -> m a) -> m ()
 modifyM ref f = readRef ref >>= f >>= writeRef ref
@@ -671,20 +667,21 @@ propagate :: forall a. Height -> Node a -> a -> EventM ()
 propagate  height node value = traverseSubs propagate' node where
 
   propagate' :: Subscription a -> EventM ()
-  propagate' (PushSub _ dest f)  = f value >>= traverse_ (writePropagate height dest)
+  propagate' (PushSub   p) = pushCompute p value >>= traverse_ (writePropagate height (pushNode p))
+  propagate' (HoldSub   h) = delayHold h value
+  propagate' (SwitchSub s) = writePropagate height (switchNode s) value
+  propagate' (CoinInner c) = writePropagate height (coinNode c) value
+  propagate' (CoinOuter c) = connectC c value >>= traverse_ (propagate height (coinNode c))
+
   propagate' (MergeSub m k) = do
     partial <- readRef (mergePartial m)
     writeRef (mergePartial m) $ DMap.insert k value partial
     when (DMap.null partial) $ delayMerge m =<< readHeight (mergeNode m)
 
-  propagate' (HoldSub _ h) =  delayHold h value
-  propagate' (SwitchSub s) = writePropagate height (switchNode s) value
-  propagate' (CoinInner c) = writePropagate height (coinNode c) value
-  propagate' (CoinOuter c) = connectC c value >>= traverse_ (propagate height (coinNode c))
   propagate' (FanSub    f) = do
     nodes <- readRef (fanNodes f)
     for_ (DMap.toList value) $ \(k :=> v) ->
-      traverseNode nodes k $ \n -> writePropagate height n v
+      traverse_ (\n -> writePropagate height n v) (DMap.lookup (WrapArg k) nodes)
 
 
 propagateMerge :: Height -> DelayMerge -> EventM ()
@@ -747,11 +744,11 @@ propagateHeight newHeight node = do
 
 traverseDest :: MonadIORef m => (forall b. Node b -> m ()) -> Subscription a -> m ()
 traverseDest f (MergeSub  m _)     = f (mergeNode m)
-traverseDest f (PushSub  _ node _) = f node
+traverseDest f (PushSub   p)       = f (pushNode p)
 traverseDest f (SwitchSub s)       = f (switchNode s)
 traverseDest f (CoinInner c)       = f (coinNode c)
 traverseDest f (CoinOuter c)       = f (coinNode c)
-traverseDest f (FanSub    fan')    = traverseWeakNodes f (fanNodes fan')
+traverseDest f (FanSub    fan')    = traverseNodes f (fanNodes fan')
 traverseDest _ (HoldSub {})        = return ()
 
 maxHeight :: Height -> Height -> Height
@@ -810,6 +807,8 @@ endFrame env  = do
   traverse_ clearNode =<< readRef (envClears env)
   connects <- writeHolds =<< readRef (envHolds env)
   connectSwitches connects =<< readRef (envCoincidences env)
+  return ()
+
 
   where
     clearNode (SomeNode node) = writeRef (nodeOcc node) Nothing

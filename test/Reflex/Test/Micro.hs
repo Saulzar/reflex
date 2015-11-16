@@ -59,15 +59,15 @@ testCases =
       b <- hold never (e <$ e)
       return $ switch b
 
-  , testE "switch-2" $ do
-      e <- events1
-      return $ coincidence $ flip pushAlways e $ const $ do
-            switch <$> hold (leftmost ["a" <$ e, "b" <$ e]) (e <$ e)
+  -- , testE "switch-2" $ do
+  --     e <- events1
+  --     return $ coincidence $ flip pushAlways e $ const $ do
+  --           switch <$> hold (leftmost ["a" <$ e, "b" <$ e]) (e <$ e)
 
-  , testE "switch-3" $ do
-      e <- events1
-      return $ coincidence $ flip pushAlways e $ const $ do
-          switch <$> hold (leftmost ["a" <$ e, "b" <$ e]) never
+  -- , testE "switch-3" $ do
+  --     e <- events1
+  --     return $ coincidence $ flip pushAlways e $ const $ do
+  --         switch <$> hold (leftmost ["a" <$ e, "b" <$ e]) never
 
   , testE "switch-4" $ do
       e <- events1
