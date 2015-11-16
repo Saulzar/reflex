@@ -77,10 +77,10 @@ benchAll (name, test) = bgroup name
 benchmarks :: Word ->  [Benchmark]
 benchmarks n =
   [ bgroup ("subscribing " ++ show n) $ benchAll <$> Focused.subscribing n 4
-  , bgroup ("firing " ++ show n) $ benchAll <$>  Focused.firing n
+  , bgroup ("firing " ++ show (n * 10)) $ benchAll <$>  Focused.firing (n * 10)
   ]
 
 
 main :: IO ()
-main = defaultMain $ (benchmarks 1000 ++ benchmarks 10000)
+main = defaultMain $ (benchmarks 100 ++ benchmarks 1000)
 
