@@ -29,11 +29,11 @@ import Control.Monad.State.Strict
 import Data.Dependent.Sum (DSum (..))
 import Data.Monoid
 import Data.Maybe
-import qualified Data.IntMap as IntMap
+import qualified Data.IntMap.Strict as IntMap
 import Control.Monad.Ref
 
 
-import Data.IntMap
+import Data.IntMap.Strict (IntMap)
 import Data.IORef
 import System.Mem
 
@@ -80,8 +80,8 @@ runPlan (Plan p) = runHostFrame $ runStateT p mempty
 
 makeDense :: Schedule t -> Schedule t
 makeDense s = fromMaybe (emptyRange 0) $ do
-  (end, _) <- fst <$> maxViewWithKey s
-  return $ union s (emptyRange end)
+  (end, _) <- fst <$> IntMap.maxViewWithKey s
+  return $ IntMap.union s (emptyRange end)
     where
       emptyRange end = IntMap.fromList (zip [0..end + 1] (repeat []))
 

@@ -57,14 +57,22 @@ instance NFData (Firing t) where
   rnf !(Firing tr a) = ()
 
 -- Measure the running time
-benchFiring ::  (MonadReflexHost' t m) => (forall a. m a -> IO a) -> (String, TestCase) -> Benchmark
+benchFiring ::  (MonadReflexHost' t m, MonadSample t m) => (forall a. m a -> IO a) -> (String, TestCase) -> Benchmark
 benchFiring runHost (name, TestE plan) = env setup (\e -> bench name $ whnfIO $ run e) where
-    run (Ignore h, s) = runHost (readSchedule s (readEvent' h))
+    run (Ignore h, s) = runHost (readSchedule s (readEvent' h)) >> performGC
     setup = runHost $ setupFiring plan
 
 benchFiring runHost (name, TestB plan) = env setup (\e -> bench name $ whnfIO $ run e) where
-    run (b, s) = runHost (readSchedule s (sample b))
-    setup = runHost $ second makeDense <$> runPlan plan
+    run (b, s) = runHost (readSchedule s (sample b)) >> performGC
+    setup = runHost $ do
+      (b, s) <- runPlan plan
+      return (b, makeDense s)
+
+
+-- main = runAntHost $ do
+--    (Ignore h, s) <- setupFiring $ Focused.switches 100 (Focused.switchFactors 100)
+--    readSchedule s (readEvent' h)
+
 
 
 benchAll ::  (String, TestCase) -> Benchmark
@@ -74,13 +82,10 @@ benchAll (name, test) = bgroup name
   ]
 
 
-benchmarks :: Word ->  [Benchmark]
-benchmarks n =
-  [ bgroup ("subscribing " ++ show n) $ benchAll <$> Focused.subscribing n 4
-  , bgroup ("firing " ++ show (n * 10)) $ benchAll <$>  Focused.firing (n * 10)
-  ]
-
-
 main :: IO ()
-main = defaultMain $ (benchmarks 100 ++ benchmarks 1000)
+main = defaultMain  [sub 100 40, firing 1000, firing 100, firing 10000]
+  where
+
+  sub n frames = bgroup ("subscribing " ++ show (n, frames)) $ benchAll <$> Focused.subscribing n frames
+  firing n =  bgroup ("firing " ++ show n) $ benchAll <$>  Focused.firing n
 

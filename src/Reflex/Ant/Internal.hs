@@ -45,7 +45,7 @@ import System.IO.Unsafe
 import Unsafe.Coerce
 
 data MakeNode a where
-  MakeNode        :: NodeRef a -> (a -> EventM (Maybe b)) -> MakeNode b
+  MakePush        :: NodeRef a -> (a -> EventM (Maybe b)) -> MakeNode b
   MakeSwitch      :: Behavior (Event a) -> MakeNode a
   MakeCoincidence :: !(NodeRef (Event a)) -> MakeNode a
   MakeRoot        :: GCompare k => k a -> Root k -> MakeNode a
@@ -56,7 +56,6 @@ data MakeNode a where
 type LazyRef a b = IORef (Either a b)
 newtype NodeRef a = NodeRef (LazyRef (MakeNode a) (Node a))
 
-
 type FanRef  k = LazyRef (NodeRef (DMap k)) (Fan k)
 type PullRef a = LazyRef (BehaviorM a) (Pull a)
 
@@ -66,7 +65,7 @@ data Event a
 
 data Behavior a
   = Constant a
-  | PullB (PullRef a)
+  | PullB !(PullRef a)
   | HoldB (Hold a)
 
 
@@ -96,18 +95,18 @@ instance Show (Subscription a) where
   show (FanSub    {}) = "Fan"
 
 
-data NodeParent a where
-  NodePush   :: Push a b -> Parent b
-  NodeMerge  :: Merge k -> Parent (DMap k)
-  NodeSwitch :: Switch a -> Parent a
+data Parent a where
+  NodePush   :: Push a b      -> Parent b
+  NodeMerge  :: Merge k       -> Parent (DMap k)
+  NodeSwitch :: Switch a      -> Parent a
   NodeCoin   :: Coincidence a -> Parent a
-  NodeFan    :: Fan k -> k a -> Parent a
-  NodeRoot   :: Parent a
+  NodeFan    :: Fan k -> k a  -> Parent a
+  NodeRoot   ::                  Parent a
 
 data Node a = Node
   { nodeSubs      :: !(IORef [Weak (Subscription a)])
   , nodeHeight    :: !(IORef Int)
-  , nodeParents   :: (Subscribing a)
+  , nodeParents   :: (Parent a)
   , nodeOcc     :: !(IORef (Maybe a))
   }
 
@@ -116,9 +115,15 @@ data Invalidator where
   PullInv   :: Pull a   -> Invalidator
   SwitchInv :: Switch a -> Invalidator
 
+data Push a b = Push
+  { pushNode    :: Node b
+  , pushParent  :: Node a
+  , pushCompute :: a -> EventM (Maybe b)
+  , pushSub     :: Subscription a
+  }
 
 data Pull a  = Pull
-  { pullInv     :: Invalidator
+  { pullInv     :: !(IORef (Maybe InvWeakPair))
   , pullInvs    :: !(IORef [Weak Invalidator])
   , pullValue   :: !(IORef (Maybe a))
   , pullCompute :: (BehaviorM a)
@@ -130,13 +135,15 @@ data Hold a = Hold
   , holdSub      :: !(LazyRef (Event a) (Maybe (Subscription a)))
   }
 
-type NodeSub a = (Node a, Weak (Subscription a))
+type NodeSub a     = (Node a, Weak (Subscription a))
+type InvWeakPair   = (Invalidator, Weak Invalidator)
+
 
 data Switch a = Switch
   { switchNode   :: Node a
   , switchSub    :: Subscription a
   , switchConn   :: !(IORef (Maybe (NodeSub a)))
-  , switchInv    :: Invalidator
+  , switchInv    :: !(IORef (Maybe InvWeakPair))
   , switchSource :: Behavior (Event a)
   }
 
@@ -166,7 +173,7 @@ data Fan k  = Fan
   }
 
 data Root k  = Root
-  { rootNodes :: IORef (DMap (WrapArg WeakNode k))
+  { rootNodes :: !(IORef (DMap (WrapArg WeakNode k)))
   , rootInit  :: (forall a. k a -> Trigger a -> IO (IO ()))
   }
 
@@ -199,14 +206,20 @@ type MonadIORef m = (MonadIO m, MonadRef m, Ref m ~ IORef)
 
 instance MonadRef EventM where
   type Ref EventM = Ref IO
+  {-# INLINE newRef #-}
   newRef = liftIO . newRef
+  {-# INLINE readRef #-}
   readRef = liftIO . readRef
+  {-# INLINE writeRef #-}
   writeRef r a = liftIO $ writeRef r a
 
 instance MonadRef BehaviorM where
   type Ref BehaviorM = Ref IO
+  {-# INLINE newRef #-}
   newRef = liftIO . newRef
+  {-# INLINE readRef #-}
   readRef = liftIO . readRef
+  {-# INLINE writeRef #-}
   writeRef r a = liftIO $ writeRef r a
 
 
@@ -218,7 +231,7 @@ unsafeLazy create = unsafePerformIO $ newIORef (Left create)
 makeNode :: MakeNode a -> IO (NodeRef a)
 makeNode create = NodeRef <$> newIORef (Left create)
 
-
+{-# INLINE unsafeCreateEvent #-}
 unsafeCreateEvent :: MakeNode a -> Event a
 unsafeCreateEvent = Event . NodeRef . unsafeLazy
 
@@ -235,6 +248,7 @@ readLazy create ref = readRef ref >>= \case
       return node
     Right node -> return node
 
+{-# INLINE readNodeRef #-}
 readNodeRef :: NodeRef a -> EventM (Node a)
 readNodeRef (NodeRef ref) = readLazy createNode ref
 
@@ -243,16 +257,17 @@ eventNode :: Event a -> EventM (Maybe (Node a))
 eventNode Never       = return Nothing
 eventNode (Event ref) = Just <$> readNodeRef ref
 
-
+{-# INLINE readHeight #-}
 readHeight :: MonadIORef m => Node a -> m Int
 readHeight node = readRef (nodeHeight node)
 
 
-newNode :: MonadIO m => Height -> Subscribing a -> m (Node a)
+newNode :: MonadIO m => Height -> Parent a -> m (Node a)
 newNode height parents = liftIO $
   Node <$> newRef [] <*> newRef height <*> pure parents <*> newRef Nothing
 
 
+{-# INLINE readNode #-}
 readNode :: MonadIORef m => Node a -> m (Maybe a)
 readNode node = readRef (nodeOcc node)
 
@@ -263,6 +278,7 @@ writeNode node a = do
   clearsRef <- asks envClears
   modifyRef clearsRef (SomeNode node :)
 
+{-# INLINE readEvent #-}
 readEvent :: EventHandle a -> IO (Maybe a)
 readEvent (EventHandle n) = join <$> traverse readNode n
 
@@ -277,13 +293,15 @@ subscribe_ :: MonadIORef m => Node a -> Subscription a -> m ()
 subscribe_ node = void . subscribe node
 
 createNode :: MakeNode a -> EventM (Node a)
-createNode (MakeNode ref f)      = makePush ref f
+createNode (MakePush ref f)      = makePush ref f
 createNode (MakeMerge refs)      = makeMerge refs
 createNode (MakeSwitch b)        = makeSwitch b
 createNode (MakeCoincidence ref) = makeCoincidence ref
 createNode (MakeRoot root k)     = makeRoot root k
 createNode (MakeFan k f)       = makeFanNode f k
 
+
+{-# INLINE constant #-}
 constant :: a -> Behavior a
 constant = Constant
 
@@ -313,24 +331,32 @@ pull = PullB . unsafeLazy
 createPull :: BehaviorM a -> IO (Pull a)
 createPull f = do
   rec
-    p <- Pull <$> pure (PullInv p) <*> newRef [] <*> newRef Nothing <*> pure f
+    p <- Pull <$> newRef Nothing <*> newRef [] <*> newRef Nothing <*> pure f
   return p
 
 
-runBehaviorM ::  BehaviorM a -> Invalidator -> IO a
-runBehaviorM (BehaviorM m) inv = runReaderT m =<< mkWeakPtr inv Nothing
+runBehaviorM ::  BehaviorM a -> Weak Invalidator -> IO a
+runBehaviorM (BehaviorM m) inv = runReaderT m inv
+
+lazyInv :: Invalidator -> IORef (Maybe InvWeakPair) -> IO (Weak Invalidator)
+lazyInv inv invRef = readRef invRef >>= \case
+    Nothing -> do
+      weakInv <- mkWeakPtr inv Nothing
+      writeRef invRef (Just (inv, weakInv))
+      return weakInv
+    Just (_, weakInv) -> return weakInv
 
 runPull :: PullRef a -> Maybe (Weak Invalidator) -> IO a
 runPull ref inv = do
-  Pull self invs valRef compute  <- readLazy createPull ref
+  p@(Pull invRef invs valRef compute)  <- readLazy createPull ref
   traverse_ (modifyRef invs . (:)) inv
   readRef valRef >>= \case
     Nothing -> do
-      a <- runBehaviorM compute self
+      a <- runBehaviorM compute =<< lazyInv (PullInv p) invRef
       a <$ writeRef valRef (Just a)
     Just a  -> return a
 
-
+{-# INLINE sampleIO #-}
 sampleIO :: Behavior a -> IO a
 sampleIO (Constant a) = return a
 sampleIO (HoldB h)    = readRef (holdValue h)
@@ -345,7 +371,7 @@ sample (HoldB (Hold invs value sub)) = do
   readRef value
 sample (PullB ref) = liftIO . runPull ref =<< asks Just
 
-
+{-# INLINE sampleE #-}
 sampleE :: Behavior a -> EventM a
 sampleE = liftIO . sampleIO
 
@@ -366,7 +392,7 @@ makeCoincidence ref = do
     let c = Coincidence node parent outerSub innerSub
         outerSub = CoinOuter c
         innerSub = CoinInner c
-    node <- newNode height (SubscribingCoin c)
+    node <- newNode height (NodeCoin c)
 
   subscribe_ parent outerSub
   readNode parent >>= traverse_ (connectC c)
@@ -403,18 +429,21 @@ switch b = unsafeCreateEvent (MakeSwitch b)
 makeSwitch ::  Behavior (Event a) -> EventM (Node a)
 makeSwitch source =  do
   connRef <- newRef Nothing
+  invRef  <- newRef Nothing
+
   rec
-    let s   = Switch node sub connRef inv source
-        inv = SwitchInv s
+    let s   = Switch node sub connRef invRef source
         sub = SwitchSub s
-    node <- newNode 0 (SubscribingSwitch s)
+    node <- newNode 0 (NodeSwitch s)
 
   writeRef (nodeHeight node)  =<< connect s
   return node
 
 connect :: Switch a -> EventM Height
-connect (Switch node sub connRef inv source) = do
-  e <- liftIO $ runBehaviorM (sample source) inv
+connect s@(Switch node sub connRef invRef source) = do
+  e <- liftIO $ do
+    inv <- lazyInv (SwitchInv s) invRef
+    runBehaviorM (sample source) inv
   case e of
     Never       -> 0 <$ writeRef connRef Nothing
     Event ref -> do
@@ -425,11 +454,12 @@ connect (Switch node sub connRef inv source) = do
       readNode parent >>= traverse_ (writeNode node)
       readHeight parent
 
-
+{-# INLINE boolM #-}
 boolM :: Applicative m => Bool -> m b -> m (Maybe b)
 boolM True  m  = Just <$> m
 boolM False _  = pure Nothing
 
+{-# INLINE bool #-}
 bool :: Bool -> a -> Maybe a
 bool True  a  = Just a
 bool False _  = Nothing
@@ -458,19 +488,20 @@ connectSwitches connects coincidences = do
 
 push :: (a -> EventM (Maybe b)) -> Event a -> Event b
 push _ Never = Never
-push f (Event ref) = unsafeCreateEvent $ MakeNode ref f
+push f (Event ref) = unsafeCreateEvent $ MakePush ref f
 
 pushAlways :: (a -> EventM b) -> Event a -> Event b
 pushAlways f = push (fmap Just . f)
-
 
 makePush :: NodeRef a -> (a -> EventM (Maybe b)) -> EventM (Node b)
 makePush ref f =  do
   parent <- readNodeRef ref
   height <- readHeight parent
+
   rec
-    let sub = PushSub parent node f
-    node <- newNode height (Subscribing sub)
+    let p   = Push node parent f sub
+        sub = PushSub p
+    node <- newNode height (NodePush p)
 
   m <- readNode parent
   traverse_ (f >=> traverse_ (writeNode node)) m
@@ -501,7 +532,7 @@ makeMerge refs = do
   rec
     subs   <- liftIO $ traverse (mergeSubscribing merge') parents
     merge' <- Merge node (DMap.fromDistinctAscList subs) <$> newRef DMap.empty
-    node <- newNode (succ height) (SubscribingMerge merge')
+    node <- newNode (succ height) (NodeMerge merge')
 
   when (not  . null  $ values) $ writeNode node (DMap.fromDistinctAscList values)
   return node
@@ -581,7 +612,7 @@ makeFanNode fanRef k = do
   f@(Fan parent _ nodes) <- readLazy makeFan fanRef
   lookupFan nodes k $ do
     height <- readHeight parent
-    node <- newNode height (SubscribingFan f k)
+    node <- newNode height (NodeFan f k)
     readNode parent >>= traverse_ (writeOcc node)
     return (node, Nothing)
 
@@ -591,7 +622,7 @@ makeFanNode fanRef k = do
 
 newEventWithFire :: IO (Event a, a -> DSum Trigger)
 newEventWithFire = do
-  node  <- newNode 0 SubscribingRoot
+  node  <- newNode 0 NodeRoot
   nodeRef  <- NodeRef <$> newIORef (Right node)
   return (Event nodeRef, (Trigger node :=>))
 
@@ -608,7 +639,7 @@ newEventWithTrigger f = do
 
 makeRoot :: GCompare k => k a -> Root k -> EventM (Node a)
 makeRoot k (Root nodes subscr) = liftIO $ lookupFan nodes k $ do
-  node       <- newNode 0 SubscribingRoot
+  node       <- newNode 0 NodeRoot
   finalizer  <- subscr  k (Trigger node)
   return (node, Just finalizer)
 
@@ -671,7 +702,7 @@ propagate :: forall a. Height -> Node a -> a -> EventM ()
 propagate  height node value = traverseSubs propagate' node where
 
   propagate' :: Subscription a -> EventM ()
-  propagate' (PushSub _ dest f)  = f value >>= traverse_ (writePropagate height dest)
+  propagate' (PushSub p)  = pushCompute p value >>= traverse_ (writePropagate height (pushNode p))
   propagate' (MergeSub m k) = do
     partial <- readRef (mergePartial m)
     writeRef (mergePartial m) $ DMap.insert k value partial
@@ -747,7 +778,7 @@ propagateHeight newHeight node = do
 
 traverseDest :: MonadIORef m => (forall b. Node b -> m ()) -> Subscription a -> m ()
 traverseDest f (MergeSub  m _)     = f (mergeNode m)
-traverseDest f (PushSub  _ node _) = f node
+traverseDest f (PushSub   p)       = f (pushNode p)
 traverseDest f (SwitchSub s)       = f (switchNode s)
 traverseDest f (CoinInner c)       = f (coinNode c)
 traverseDest f (CoinOuter c)       = f (coinNode c)
@@ -864,9 +895,11 @@ instance R.MonadReflexCreateTrigger Ant EventM where
     return $ R.EventSelector $ AntEvent . select es
 
 instance R.MonadSample Ant BehaviorM where
+  {-# INLINE sample #-}
   sample (AntBehavior b) = sample b
 
 instance R.MonadSample Ant EventM where
+  {-# INLINE sample #-}
   sample (AntBehavior b) = sampleE b
 
 instance R.MonadHold Ant EventM where
@@ -896,6 +929,7 @@ instance R.MonadReflexHost Ant AntHost where
   runHostFrame = liftIO . runHostFrame
 
 instance R.MonadSample Ant AntHost where
+  {-# INLINE sample #-}
   sample (AntBehavior b) = liftIO (sampleIO b)
 
 

@@ -5,6 +5,7 @@ module Reflex.Bench.Focused where
 import Reflex
 import Reflex.TestPlan
 
+import Control.Monad
 import Control.Applicative
 import Data.Foldable
 import Data.Traversable
@@ -14,6 +15,8 @@ import qualified Data.Map as Map
 
 import Data.List
 import Data.List.Split
+
+import Debug.Trace
 
 import Prelude
 
@@ -87,7 +90,9 @@ coinChain n e = iterateN (\e' -> coincidence (e' <$ e')) e n
 
 
 pullChain :: Reflex t => Word -> Behavior t Word -> Behavior t Word
-pullChain n b = iterateN (\b' -> pull $ sample b') b n
+pullChain n b = iterateN (fmap (+1)) b n
+
+
 
 -- Give N events split across M frames approximately evenly
 sparseEvents :: TestPlan t m => Word -> Word -> m [Event t Word]
@@ -129,6 +134,7 @@ subscribing n frames =
   ]
 
 
+
 firing :: Word -> [(String, TestCase)]
 firing n =
   [ testE "dense mergeTree 8"      $ mergeTree 8 <$> denseEvents n
@@ -139,6 +145,12 @@ firing n =
       return $ pull $ sum <$> traverse sample counts
 
   , testB "pullChain"                 $ pullChain n . current <$> (count =<< events 4)
+  , testB "pullChain2"                $ do
+    e <- events 4
+    b <- hold (constant 0) $ pushAlways (const $ pullChain n <$> hold 0 e) e
+
+    return (join b)
+
   , testB "mergeTree (pull) counters" $ mergeTree 8 <$> counters n 10
   ]
 
