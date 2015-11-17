@@ -33,7 +33,7 @@ library
     haskell-src-meta == 0.6.*,
     syb == 0.5.*,
     deepseq,
-    dlist
+    structs
 
   exposed-modules:
     Reflex,

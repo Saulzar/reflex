@@ -43,6 +43,8 @@ import Data.IORef
 import System.Mem.Weak
 import System.IO.Unsafe
 import Unsafe.Coerce
+import Data.Struct.Internal
+
 
 data MakeNode a where
   MakeNode        :: NodeRef a -> (a -> EventM (Maybe b)) -> MakeNode b
@@ -104,12 +106,25 @@ data Subscribing b where
   SubscribingRoot   :: Subscribing b
   SubscribingFan    :: Fan k -> k a -> Subscribing a
 
-data Node a = Node
-  { nodeSubs      :: !(IORef [Weak (Subscription a)])
-  , nodeHeight    :: !(IORef Int)
-  , nodeParents   :: (Subscribing a)
-  , nodeOcc     :: !(IORef (Maybe a))
-  }
+
+newtype NodeStruct a s = NodeStruct (Object s)
+newtype Node a = Node { unNode :: NodeStruct a RealWorld }
+
+
+instance Struct (NodeStruct a) where
+  struct _ = Dict
+
+nodeSubs :: Field (NodeStruct a) [Weak (Subscription a)]
+nodeSubs = field 0
+
+nodeHeight :: Field (NodeStruct a) Int
+nodeHeight = field 1
+
+nodeParents :: Field (NodeStruct a) (Subscribing a)
+nodeParents = field 2
+
+nodeOcc :: Field (NodeStruct a) (Maybe a)
+nodeOcc = field 3
 
 
 data Invalidator where
@@ -245,32 +260,46 @@ eventNode (Event ref) = Just <$> readNodeRef ref
 
 
 readHeight :: MonadIORef m => Node a -> m Int
-readHeight node = readRef (nodeHeight node)
+readHeight (Node struct) = liftIO $ getField nodeHeight struct
 
 
 newNode :: MonadIO m => Height -> Subscribing a -> m (Node a)
-newNode height parents = liftIO $
-  Node <$> newRef [] <*> newRef height <*> pure parents <*> newRef Nothing
+newNode height parents = liftIO $ do
+  struct <- alloc 4
+  setField nodeSubs struct []
+  setField nodeOcc struct Nothing
+  setField nodeParents struct parents
+  setField nodeHeight struct height
+  return (Node struct)
 
+setHeight :: MonadIO m => Node a -> Height -> m ()
+setHeight (Node struct) height = liftIO $ setField nodeHeight struct height
 
-readNode :: MonadIORef m => Node a -> m (Maybe a)
-readNode node = readRef (nodeOcc node)
+clearNode :: SomeNode -> IO ()
+clearNode (SomeNode (Node struct)) = liftIO $
+  setField nodeOcc struct Nothing
+
+readNode :: MonadIO m => Node a -> m (Maybe a)
+readNode (Node struct) = liftIO $ getField nodeOcc struct
 
 
 writeNode :: Node a -> a -> EventM ()
-writeNode node a = do
-  writeRef (nodeOcc node) (Just a)
+writeNode n@(Node struct) a = do
+  liftIO $ setField nodeOcc struct (Just a)
   clearsRef <- asks envClears
-  modifyRef clearsRef (SomeNode node :)
+  modifyRef clearsRef (SomeNode n :)
 
 readEvent :: EventHandle a -> IO (Maybe a)
 readEvent (EventHandle n) = join <$> traverse readNode n
 
 
 subscribe :: MonadIORef m => Node a -> Subscription a -> m (Weak (Subscription a))
-subscribe node sub = liftIO $ do
+subscribe (Node struct) sub = liftIO $ do
   weakSub <- mkWeakPtr sub Nothing
-  modifyRef (nodeSubs node) (weakSub :)
+
+  subs <- getField nodeSubs struct
+  setField nodeSubs struct (weakSub : subs)
+
   return weakSub
 
 subscribe_ :: MonadIORef m => Node a -> Subscription a -> m ()
@@ -409,7 +438,7 @@ makeSwitch source =  do
         sub = SwitchSub s
     node <- newNode 0 (SubscribingSwitch s)
 
-  writeRef (nodeHeight node)  =<< connect s
+  setHeight node  =<< connect s
   return node
 
 connect :: Switch a -> EventM Height
@@ -485,6 +514,9 @@ merge events = case catEvents (DMap.toAscList events) of
   refs -> unsafeCreateEvent (MakeMerge refs)
 
 
+
+
+
 mergeSubscribing :: GCompare k =>  Merge k -> DSum (WrapArg Node k) -> IO (DSum (WrapArg (MergeParent k) k))
 mergeSubscribing  merge' (WrapArg k :=> parent) = do
   subscribe_ parent sub
@@ -532,7 +564,7 @@ lookupWeakNode nodes k = case DMap.lookup (WrapArg k) nodes of
   Nothing              -> return Nothing
   Just (WeakNode node) -> deRefWeak node
 
-traverseWeakNode :: (MonadIORef m) => (Node a -> m ()) -> WeakNode a -> m ()
+traverseWeakNode :: (MonadIO m) => (Node a -> m ()) -> WeakNode a -> m ()
 traverseWeakNode f (WeakNode node) = liftIO (deRefWeak node) >>= traverse_ f
 
 
@@ -543,7 +575,7 @@ traverseWeakNodes f nodesRef = do
 
   where
     traverseNode' :: DSum (WrapArg WeakNode k) -> m ()
-    traverseNode' (WrapArg _ :=> node) = traverseWeakNode f node
+    traverseNode' (WrapArg k :=> node) = traverseWeakNode f node
 
 traverseNode :: (GCompare k, MonadIORef m) => DMap (WrapArg WeakNode k) -> k a -> (Node a -> m ()) -> m ()
 traverseNode nodes k f = traverse_ (traverseWeakNode f) (DMap.lookup (WrapArg k) nodes)
@@ -627,10 +659,15 @@ traverseWeakSubs f subs = do
 -- In which case we need to be very careful not to lose any new subscriptions
 
 traverseSubs :: MonadIORef m =>  (Subscription a -> m ()) -> Node a -> m ()
-traverseSubs f node = do
-  subs  <- takeRef (nodeSubs node)
-  subs' <- traverseWeakSubs f subs
-  modifyRef (nodeSubs node) (++subs')
+traverseSubs f (Node struct) = do
+  subs <- liftIO $
+    getField nodeSubs struct <* setField nodeSubs struct []
+
+  filtered <- traverseWeakSubs f subs
+
+  liftIO $ do
+    newSubs <- getField nodeSubs struct
+    setField nodeSubs struct (newSubs ++ filtered)
 
 
 forSubs :: MonadIORef m =>  Node a -> (Subscription a -> m ()) -> m ()
@@ -740,7 +777,7 @@ propagateHeight :: Height -> Node a -> IO ()
 propagateHeight newHeight node = do
   height <- readHeight node
   when (height < newHeight) $ do
-    writeRef (nodeHeight node) newHeight
+    setHeight node newHeight
     forSubs node $ \case
       MergeSub (Merge dest _ _)  _ -> propagateHeight (succ newHeight) dest
       sub -> traverseDest (propagateHeight newHeight) sub
@@ -810,9 +847,6 @@ endFrame env  = do
   traverse_ clearNode =<< readRef (envClears env)
   connects <- writeHolds =<< readRef (envHolds env)
   connectSwitches connects =<< readRef (envCoincidences env)
-
-  where
-    clearNode (SomeNode node) = writeRef (nodeOcc node) Nothing
 
 fireEventsAndRead :: [DSum Trigger] -> EventM a -> IO a
 fireEventsAndRead triggers runRead = do
