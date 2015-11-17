@@ -78,7 +78,7 @@ newtype EventSelector k = EventSelector { select :: forall a. k a -> Event a }
 type Height = Int
 
 data Subscription a where
-  PushSub   :: Node a -> Node b -> (a -> EventM (Maybe b)) -> Subscription a
+  PushSub   :: Push a b -> Subscription a
   MergeSub  :: GCompare k => Merge k -> k a -> Subscription a
   FanSub    :: GCompare k => Fan k -> Subscription (DMap k)
   HoldSub   :: Node a -> Hold a -> Subscription a
@@ -96,13 +96,13 @@ instance Show (Subscription a) where
   show (FanSub    {}) = "Fan"
 
 
-data Subscribing b where
-  Subscribing       :: Subscription a -> Subscribing b
-  SubscribingMerge  :: (Merge k) -> Subscribing (DMap k)
-  SubscribingSwitch :: (Switch a) -> Subscribing a
-  SubscribingCoin   :: (Coincidence a) -> Subscribing a
-  SubscribingRoot   :: Subscribing b
-  SubscribingFan    :: Fan k -> k a -> Subscribing a
+data NodeParent a where
+  NodePush   :: Push a b -> Parent b
+  NodeMerge  :: Merge k -> Parent (DMap k)
+  NodeSwitch :: Switch a -> Parent a
+  NodeCoin   :: Coincidence a -> Parent a
+  NodeFan    :: Fan k -> k a -> Parent a
+  NodeRoot   :: Parent a
 
 data Node a = Node
   { nodeSubs      :: !(IORef [Weak (Subscription a)])
