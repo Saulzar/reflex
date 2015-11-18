@@ -20,7 +20,7 @@ testCases :: [(String, TestCase)]
 testCases =
   [ testB "hold"  $ hold "0" =<< events1
   , testB "count" $ current <$> (count =<< events2)
-  , testB "pull"  $ do
+  , testB "pull-1"  $ do
       b <- hold "0" =<< events1
       return (id <$> id <$> b)
 
@@ -59,15 +59,15 @@ testCases =
       b <- hold never (e <$ e)
       return $ switch b
 
-  -- , testE "switch-2" $ do
-  --     e <- events1
-  --     return $ coincidence $ flip pushAlways e $ const $ do
-  --           switch <$> hold (leftmost ["a" <$ e, "b" <$ e]) (e <$ e)
+  , testE "switch-2" $ do
+      e <- events1
+      return $ coincidence $ flip pushAlways e $ const $ do
+            switch <$> hold (leftmost ["a" <$ e, "b" <$ e]) (e <$ e)
 
-  -- , testE "switch-3" $ do
-  --     e <- events1
-  --     return $ coincidence $ flip pushAlways e $ const $ do
-  --         switch <$> hold (leftmost ["a" <$ e, "b" <$ e]) never
+  , testE "switch-3" $ do
+      e <- events1
+      return $ coincidence $ flip pushAlways e $ const $ do
+          switch <$> hold (leftmost ["a" <$ e, "b" <$ e]) never
 
   , testE "switch-4" $ do
       e <- events1

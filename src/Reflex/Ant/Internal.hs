@@ -112,8 +112,8 @@ data Node a = Node
 
 
 data Invalidator where
-  PullInv   :: Pull a   -> Invalidator
-  SwitchInv :: Switch a -> Invalidator
+  PullInv   :: Weak (Pull a)   -> Invalidator
+  SwitchInv :: Weak (Switch a) -> Invalidator
 
 data Push a b = Push
   { pushNode    :: Node b
@@ -123,27 +123,25 @@ data Push a b = Push
   }
 
 data Pull a  = Pull
-  { pullInv     :: !(IORef (Maybe InvWeakPair))
-  , pullInvs    :: !(IORef [Weak Invalidator])
+  { pullInv     :: !Invalidator
+  , pullInvs    :: !(IORef [Invalidator])
   , pullValue   :: !(IORef (Maybe a))
   , pullCompute :: (BehaviorM a)
   }
 
 data Hold a = Hold
-  { holdInvs     :: !(IORef [Weak Invalidator])
+  { holdInvs     :: !(IORef [Invalidator])
   , holdValue    :: !(IORef a)
   , holdSub      :: !(LazyRef (Event a) (Maybe (Subscription a)))
   }
 
 type NodeSub a     = (Node a, Weak (Subscription a))
-type InvWeakPair   = (Invalidator, Weak Invalidator)
-
 
 data Switch a = Switch
   { switchNode   :: Node a
   , switchSub    :: Subscription a
   , switchConn   :: !(IORef (Maybe (NodeSub a)))
-  , switchInv    :: !(IORef (Maybe InvWeakPair))
+  , switchInv    :: Invalidator
   , switchSource :: Behavior (Event a)
   }
 
@@ -198,8 +196,8 @@ data Env = Env
 newtype EventM a = EventM { unEventM :: ReaderT Env IO a }
     deriving (Functor, Applicative, Monad, MonadFix, MonadIO, MonadReader Env)
 
-newtype BehaviorM a = BehaviorM { unBehaviorM :: ReaderT (Weak Invalidator) IO a }
-    deriving (Functor, Applicative, Monad, MonadFix, MonadIO, MonadReader (Weak Invalidator))
+newtype BehaviorM a = BehaviorM { unBehaviorM :: ReaderT (Invalidator) IO a }
+    deriving (Functor, Applicative, Monad, MonadFix, MonadIO, MonadReader (Invalidator))
 
 
 type MonadIORef m = (MonadIO m, MonadRef m, Ref m ~ IORef)
@@ -298,7 +296,7 @@ createNode (MakeMerge refs)      = makeMerge refs
 createNode (MakeSwitch b)        = makeSwitch b
 createNode (MakeCoincidence ref) = makeCoincidence ref
 createNode (MakeRoot root k)     = makeRoot root k
-createNode (MakeFan k f)       = makeFanNode f k
+createNode (MakeFan k f)         = makeFanNode f k
 
 
 {-# INLINE constant #-}
@@ -324,43 +322,55 @@ initHold (HoldInit h) = void $ readLazy createHold (holdSub h) where
 
     return (Just sub)
 
-
 pull :: BehaviorM a -> Behavior a
 pull = PullB . unsafeLazy
 
 createPull :: BehaviorM a -> IO (Pull a)
 createPull f = do
   rec
-    p <- Pull <$> newRef Nothing <*> newRef [] <*> newRef Nothing <*> pure f
+    p   <- Pull inv <$> newRef [] <*> newRef Nothing <*> pure f
+    inv <- PullInv <$> mkWeakPtr p Nothing
+
   return p
 
-
-runBehaviorM ::  BehaviorM a -> Weak Invalidator -> IO a
+{-# INLINE runBehaviorM #-}
+runBehaviorM ::  BehaviorM a -> Invalidator -> IO a
 runBehaviorM (BehaviorM m) inv = runReaderT m inv
 
-lazyInv :: Invalidator -> IORef (Maybe InvWeakPair) -> IO (Weak Invalidator)
-lazyInv inv invRef = readRef invRef >>= \case
-    Nothing -> do
-      weakInv <- mkWeakPtr inv Nothing
-      writeRef invRef (Just (inv, weakInv))
-      return weakInv
-    Just (_, weakInv) -> return weakInv
+-- lazyInv :: Invalidator -> IORef (Maybe InvWeakPair) -> IO (Weak Invalidator)
+-- lazyInv inv invRef = readRef invRef >>= \case
+--     Nothing -> do
+--       weakInv <- mkWeakPtr inv Nothing
+--       writeRef invRef (Just (inv, weakInv))
+--       return weakInv
+--     Just (_, weakInv) -> return weakInv
 
-runPull :: PullRef a -> Maybe (Weak Invalidator) -> IO a
-runPull ref inv = do
-  p@(Pull invRef invs valRef compute)  <- readLazy createPull ref
-  traverse_ (modifyRef invs . (:)) inv
+
+{-# INLINE runPullInv #-}
+runPullInv :: PullRef a -> Invalidator -> IO a
+runPullInv ref inv = do
+  p  <- readLazy createPull ref
+  modifyRef (pullInvs p) (inv:)
+  runPull' p
+
+{-# INLINE runPull #-}
+runPull :: PullRef a -> IO a
+runPull ref = runPull' =<< readLazy createPull ref
+
+runPull' :: Pull a -> IO a
+runPull' (Pull inv _ valRef compute) = do
   readRef valRef >>= \case
     Nothing -> do
-      a <- runBehaviorM compute =<< lazyInv (PullInv p) invRef
+      a <- runBehaviorM compute inv
       a <$ writeRef valRef (Just a)
     Just a  -> return a
+
 
 {-# INLINE sampleIO #-}
 sampleIO :: Behavior a -> IO a
 sampleIO (Constant a) = return a
 sampleIO (HoldB h)    = readRef (holdValue h)
-sampleIO (PullB ref)  = runPull ref Nothing
+sampleIO (PullB ref)  = runPull ref
 
 
 sample :: Behavior a -> BehaviorM a
@@ -369,7 +379,7 @@ sample (HoldB (Hold invs value sub)) = do
   liftIO (touch sub) --Otherwise the gc seems to know that we never read the IORef again!
   ask >>= modifyRef invs . (:)
   readRef value
-sample (PullB ref) = liftIO . runPull ref =<< asks Just
+sample (PullB ref) = liftIO . runPullInv ref =<< ask
 
 {-# INLINE sampleE #-}
 sampleE :: Behavior a -> EventM a
@@ -428,22 +438,24 @@ switch b = unsafeCreateEvent (MakeSwitch b)
 
 makeSwitch ::  Behavior (Event a) -> EventM (Node a)
 makeSwitch source =  do
-  connRef <- newRef Nothing
-  invRef  <- newRef Nothing
-
-  rec
-    let s   = Switch node sub connRef invRef source
-        sub = SwitchSub s
-    node <- newNode 0 (NodeSwitch s)
-
+  (node, s) <- liftIO $ makeSwitch' =<< newRef Nothing
   writeRef (nodeHeight node)  =<< connect s
   return node
 
+  where
+    makeSwitch' connRef = do
+      rec
+        let s   = Switch node sub connRef inv source
+            sub = SwitchSub s
+
+        inv  <- SwitchInv <$> mkWeakPtr s Nothing
+        node <- newNode 0 (NodeSwitch s)
+      return (node, s)
+
+
 connect :: Switch a -> EventM Height
-connect s@(Switch node sub connRef invRef source) = do
-  e <- liftIO $ do
-    inv <- lazyInv (SwitchInv s) invRef
-    runBehaviorM (sample source) inv
+connect (Switch node sub connRef inv source) = do
+  e <- liftIO $ runBehaviorM (sample source) inv
   case e of
     Never       -> 0 <$ writeRef connRef Nothing
     Event ref -> do
@@ -754,14 +766,22 @@ writeHold (WriteHold h value) = do
   writeRef (holdValue h) value
   takeRef (holdInvs h) >>= invalidate
 
+{-# INLINE traverseWeak #-}
+traverseWeak :: MonadIO m => (a -> m ()) -> Weak a -> m ()
+traverseWeak f weak = liftIO (deRefWeak weak) >>= traverse_ f
 
-invalidate :: [Weak Invalidator] -> InvalidateM ()
-invalidate = traverse_ (liftIO . deRefWeak >=> traverse_ invalidate') where
-  invalidate' (PullInv p) = do
+{-# INLINE forWeak #-}
+forWeak :: MonadIO m => Weak a -> (a -> m ()) -> m ()
+forWeak = flip traverseWeak
+
+invalidate :: [Invalidator] -> InvalidateM ()
+invalidate = traverse_  invalidate' where
+  invalidate' (PullInv wp) = forWeak wp $ \p -> do
     writeRef (pullValue p) Nothing
     takeRef (pullInvs p) >>= invalidate
 
-  invalidate' (SwitchInv s) = modify (Connect s:)
+  invalidate' (SwitchInv ws) =
+    forWeak ws $ \s -> modify (Connect s:)
 
 
 
