@@ -48,12 +48,12 @@ library
     Data.Functor.Misc
 
   other-extensions: TemplateHaskell
-  ghc-options: -Wall  -fwarn-tabs  -O2
+  ghc-options: -O2 -Wall  -fwarn-tabs 
 
 test-suite all
   type: exitcode-stdio-1.0
   main-is: Reflex/Test/RunAll.hs
-  ghc-options: -O2
+  ghc-options: -O2 -Wall
   hs-source-dirs: test
   build-depends:
     base,
@@ -70,7 +70,7 @@ benchmark bench
   type: exitcode-stdio-1.0
   hs-source-dirs: bench test
   main-is: RunAll.hs
-  ghc-options: -O2  
+  ghc-options: -O2 -Wall
   build-depends:
     base,
     containers,

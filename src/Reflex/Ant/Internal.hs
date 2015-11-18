@@ -15,6 +15,9 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE EmptyDataDecls #-}
 
+{-# LANGUAGE BangPatterns #-}
+
+
 module Reflex.Ant.Internal where
 
 
@@ -123,7 +126,7 @@ data Push a b = Push
   }
 
 data Pull a  = Pull
-  { pullInv     :: !Invalidator
+  { pullInv     :: Invalidator
   , pullInvs    :: !(IORef [Invalidator])
   , pullValue   :: !(IORef (Maybe a))
   , pullCompute :: (BehaviorM a)
@@ -281,9 +284,13 @@ readEvent :: EventHandle a -> IO (Maybe a)
 readEvent (EventHandle n) = join <$> traverse readNode n
 
 
+makeWeak :: a -> Maybe (IO ()) -> IO (Weak a)
+makeWeak (!a) finalizer = mkWeakPtr a finalizer
+
+
 subscribe :: MonadIORef m => Node a -> Subscription a -> m (Weak (Subscription a))
 subscribe node sub = liftIO $ do
-  weakSub <- mkWeakPtr sub Nothing
+  weakSub <- makeWeak sub Nothing
   modifyRef (nodeSubs node) (weakSub :)
   return weakSub
 
@@ -329,7 +336,7 @@ createPull :: BehaviorM a -> IO (Pull a)
 createPull f = do
   rec
     p   <- Pull inv <$> newRef [] <*> newRef Nothing <*> pure f
-    inv <- PullInv <$> mkWeakPtr p Nothing
+    inv <- PullInv <$> makeWeak p Nothing
 
   return p
 
@@ -448,7 +455,7 @@ makeSwitch source =  do
         let s   = Switch node sub connRef inv source
             sub = SwitchSub s
 
-        inv  <- SwitchInv <$> mkWeakPtr s Nothing
+        inv  <- SwitchInv <$> makeWeak s Nothing
         node <- newNode 0 (NodeSwitch s)
       return (node, s)
 

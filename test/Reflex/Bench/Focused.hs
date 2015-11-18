@@ -93,7 +93,6 @@ pullChain :: Reflex t => Word -> Behavior t Word -> Behavior t Word
 pullChain n b = iterateN (fmap (+1)) b n
 
 
-
 -- Give N events split across M frames approximately evenly
 sparseEvents :: TestPlan t m => Word -> Word -> m [Event t Word]
 sparseEvents n frames = do
