@@ -730,7 +730,7 @@ propagate  height !node !value = traverseSubs propagate' node where
   propagate' (PushSub !w)  = forWeak w $ \(!p) ->
     pushCompute p value >>= traverse_ (writePropagate height (pushNode p))
 
-  propagate' (MergeSub !w !k) = forWeak w $ \(!m) -> do
+  propagate' (MergeSub !w !k) = forWeak w $ \m -> do
     partial <- readRef (mergePartial m)
     writeRef (mergePartial m) $ DMap.insert k value partial
     when (DMap.null partial) $ delayMerge m =<< readHeight (mergeNode m)

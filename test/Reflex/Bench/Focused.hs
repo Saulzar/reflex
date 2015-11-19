@@ -204,7 +204,7 @@ merging n =
 
   where
     sparse :: TestPlan t m => m [Event t Word]
-    sparse = occasional n 4 n
+    sparse = fmap (fmap (+1)) <$> occasional n 4 n
 
     counters :: TestPlan t m => m [Behavior t Int]
     counters = countMany =<< sparse
