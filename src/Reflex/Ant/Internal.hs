@@ -164,7 +164,7 @@ newtype WeakNode a = WeakNode { unWeakNode :: Weak (Node a) }
 
 data Fan k  = Fan
   { fanParent   :: Node (DMap k)
-  , fanNodes    :: IORef (DMap (WrapArg WeakNode k))
+  , fanNodes    :: !(IORef (DMap (WrapArg WeakNode k)))
   }
 
 data Root k  = Root
@@ -256,7 +256,7 @@ eventNode (Event ref) = Just <$> readNodeRef ref
 readHeight :: MonadIORef m => Node a -> m Int
 readHeight node = readRef (nodeHeight node)
 
-
+{-# INLINE newNode #-}
 newNode :: MonadIO m => Height -> Parent a -> m (Node a)
 newNode height parents = liftIO $
   Node <$> newRef [] <*> newRef height <*> pure parents <*> newRef Nothing
@@ -266,7 +266,7 @@ newNode height parents = liftIO $
 readNode :: MonadIORef m => Node a -> m (Maybe a)
 readNode node = readRef (nodeOcc node)
 
-
+{-# INLINE writeNode #-}
 writeNode :: Node a -> a -> EventM ()
 writeNode node a = do
   writeRef (nodeOcc node) (Just a)
@@ -280,14 +280,15 @@ readEvent (EventHandle n) = join <$> traverse readNode n
 
 -- Make sure to evaluate arguments to mkWeakPtr (bang pattern important)
 -- can cause GHC to crash or weak pointers to finalize early
+{-# INLINE makeWeakFin #-}
 makeWeakFin :: MonadIO m => a -> Maybe (IO ()) -> m (Weak a)
 makeWeakFin (!a) finalizer = liftIO $ mkWeakPtr a finalizer
 
-
+{-# INLINE makeWeak #-}
 makeWeak :: MonadIO m => a  -> m (Weak a)
 makeWeak (!a) = liftIO $ mkWeakPtr a Nothing
 
-
+{-# INLINE subscribe #-}
 subscribe :: MonadIORef m => Node a -> Subscription a -> m ()
 subscribe node sub = liftIO $ modifyRef (nodeSubs node) (sub :)
 
@@ -321,6 +322,7 @@ initHold (HoldInit h) = void $ readLazy createHold (holdParent h) where
 
     subscribe parent =<< HoldSub <$> makeWeak h
     return (Just parent)
+
 
 pull :: BehaviorM a -> Behavior a
 pull = PullB . unsafeLazy
@@ -484,11 +486,14 @@ connectSwitches connects coincidences = do
   traverse_ reconnect connects
 
 
-
+{-# INLINE push #-}
 push :: (a -> EventM (Maybe b)) -> Event a -> Event b
 push _ Never = Never
 push f (Event ref) = unsafeCreateEvent $ MakePush ref f
 
+
+
+{-# INLINE pushAlways #-}
 pushAlways :: (a -> EventM b) -> Event a -> Event b
 pushAlways f = push (fmap Just . f)
 
@@ -535,6 +540,8 @@ makeMerge refs = do
       subscribeMerge :: Weak (Merge k) -> DSum (WrapArg Node k) -> IO ()
       subscribeMerge weak (WrapArg k :=> parent) = subscribe parent (MergeSub weak k)
 
+
+{-# INLINE never #-}
 never :: Event a
 never = Never
 
@@ -553,11 +560,14 @@ makeFan ref = do
   subscribe parent =<< FanSub <$> makeWeak f
   return f
 
+{-# INLINE lookupWeakNode #-}
 lookupWeakNode :: GCompare k =>  DMap (WrapArg WeakNode k) -> k a -> IO (Maybe (Node a))
 lookupWeakNode nodes k = case DMap.lookup (WrapArg k) nodes of
   Nothing              -> return Nothing
   Just (WeakNode node) -> deRefWeak node
 
+
+{-# INLINE traverseWeakNode #-}
 traverseWeakNode :: (MonadIORef m) => (Node a -> m ()) -> WeakNode a -> m ()
 traverseWeakNode f (WeakNode node) = liftIO (deRefWeak node) >>= traverse_ f
 
@@ -571,6 +581,8 @@ traverseWeakNodes f nodesRef = do
     traverseNode' :: DSum (WrapArg WeakNode k) -> m ()
     traverseNode' (WrapArg _ :=> node) = traverseWeakNode f node
 
+
+{-# INLINE traverseNode #-}
 traverseNode :: (GCompare k, MonadIORef m) => DMap (WrapArg WeakNode k) -> k a -> (Node a -> m ()) -> m ()
 traverseNode nodes k f = traverse_ (traverseWeakNode f) (DMap.lookup (WrapArg k) nodes)
 
@@ -645,10 +657,11 @@ takeRef ref = readRef ref <* writeRef ref []
 askRef :: (MonadReader r m, MonadRef m) => (r -> Ref m a) -> m a
 askRef = asks >=> readRef
 
+{-# INLINE askModifyRef #-}
 askModifyRef :: (MonadReader r m, MonadRef m) => (r -> Ref m a) -> (a -> a) -> m ()
 askModifyRef g f = asks g >>= flip modifyRef f
 
-
+{-# INLINE modifyM #-}
 modifyM :: MonadRef m => Ref m a -> (a -> m a) -> m ()
 modifyM ref f = readRef ref >>= f >>= writeRef ref
 
@@ -722,13 +735,13 @@ propagate  height !node !value = traverseSubs propagate' node where
     writeRef (mergePartial m) $ DMap.insert k value partial
     when (DMap.null partial) $ delayMerge m =<< readHeight (mergeNode m)
 
-  propagate' (HoldSub   w) = forWeak w $ \h -> delayHold h value
-  propagate' (SwitchSub w) = forWeak w $ \s -> writePropagate height (switchNode s) value
-  propagate' (CoinInner w) = forWeak w $ \c -> writePropagate height (coinNode c) value
-  propagate' (CoinOuter w) = forWeak w $ \c ->
+  propagate' (HoldSub   !w) = forWeak w $ \h -> delayHold h value
+  propagate' (SwitchSub !w) = forWeak w $ \s -> writePropagate height (switchNode s) value
+  propagate' (CoinInner !w) = forWeak w $ \c -> writePropagate height (coinNode c) value
+  propagate' (CoinOuter !w) = forWeak w $ \c ->
     connectC c value >>= traverse_ (propagate height (coinNode c))
 
-  propagate' (FanSub    w) = forWeak w $ \f ->  do
+  propagate' (FanSub    !w) = forWeak w $ \f ->  do
     nodes <- readRef (fanNodes f)
     for_ (DMap.toList value) $ \(k :=> v) ->
       traverseNode nodes k $ \n -> writePropagate height n v
@@ -957,6 +970,7 @@ mapDMap f = mapDSums f . DMap.toList
 
 catDSums :: [DSum (WrapArg Maybe k)] -> [DSum k]
 catDSums = catMaybes . map toMaybe
+
 
 toMaybe :: DSum (WrapArg Maybe k)  -> Maybe (DSum k)
 toMaybe (WrapArg k :=> Just v ) = Just (k :=> v)

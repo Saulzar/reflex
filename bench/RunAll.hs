@@ -83,9 +83,11 @@ benchAll (name, test) = bgroup name
 
 
 main :: IO ()
-main = defaultMain  [sub 100 40, firing 1000, firing 100, firing 10000]
+main = defaultMain  [sub 100 40, firing 1000,  firing 10000, merging 50, merging 200]
   where
+    sub n frames = bgroup ("subscribing " ++ show (n, frames)) $ benchAll <$> Focused.subscribing n frames
+    firing n =  bgroup ("firing " ++ show n) $ benchAll <$>  Focused.firing n
+    merging n = bgroup ("merging " ++ show n) $ benchAll <$> Focused.merging n
 
-  sub n frames = bgroup ("subscribing " ++ show (n, frames)) $ benchAll <$> Focused.subscribing n frames
-  firing n =  bgroup ("firing " ++ show n) $ benchAll <$>  Focused.firing n
+
 

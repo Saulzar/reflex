@@ -34,6 +34,7 @@ main = do
      [ group "micro" Micro.testCases
      , group "subscribing (100,40)" (Focused.subscribing 100 40)
      , group "firing 1000" (Focused.firing 1000)
+     , group "merge 100" (Focused.merging 100)
      ]
 
     group name tests = first (\test -> intercalate "/" [name, test]) <$> tests
