@@ -44,6 +44,7 @@ import qualified Data.IntMap.Strict as IntMap
 
 import Data.IORef
 import System.Mem.Weak
+import System.Mem
 import System.IO.Unsafe
 import Unsafe.Coerce
 
@@ -233,7 +234,7 @@ unsafeCreateEvent = Event . NodeRef . unsafeLazy
 createEvent  :: MakeNode a -> IO (Event a)
 createEvent create = Event <$> makeNode create
 
-
+{-# INLINE readLazy #-}
 readLazy :: MonadIORef m => (a -> m b) -> LazyRef a b -> m b
 readLazy create ref = readRef ref >>= \case
     Left a -> do
@@ -426,33 +427,30 @@ switch b = unsafeCreateEvent (MakeSwitch b)
 
 makeSwitch ::  Behavior (Event a) -> EventM (Node a)
 makeSwitch source =  do
-  (node, s) <- liftIO $ makeSwitch' =<< newRef Nothing
+  connRef <- newRef Nothing
+  rec
+    let s = Switch node inv connRef source
+
+    inv  <- SwitchInv <$> makeWeak s
+    node <- newNode 0 (NodeSwitch s)
+
   writeRef (nodeHeight node)  =<< connect s
   return node
 
-  where
-    makeSwitch' connRef = do
-      rec
-        let s   = Switch node inv connRef source
-
-        inv  <- SwitchInv <$> makeWeak s
-        node <- newNode 0 (NodeSwitch s)
-      return (node, s)
-
-
+{-# INLINE connect #-}
 connect :: Switch a -> EventM Height
-connect s@(Switch node inv connRef source) = do
-  e <- liftIO $ runBehaviorM (sample source) inv
+connect s = do
+  e <- liftIO $ runBehaviorM (sample (switchSource s)) (switchInv s)
   case e of
-    Never       -> 0 <$ writeRef connRef Nothing
+    Never       -> 0 <$ writeRef (switchConn s) Nothing
     Event ref -> do
       parent <- readNodeRef ref
 
       weak <- makeWeak s
       subscribe parent (SwitchSub weak)
 
-      writeRef connRef (Just (parent, weak))
-      readNode parent >>= traverse_ (writeNode node)
+      writeRef (switchConn s) (Just (parent, weak))
+      readNode parent >>= traverse_ (writeNode (switchNode s))
       readHeight parent
 
 {-# INLINE boolM #-}
@@ -547,11 +545,10 @@ fan (Event ref) = EventSelector $ \k -> unsafeCreateEvent (MakeFan k fanRef) whe
   {-# NOINLINE fanRef #-}  -- Would be safe, but not efficient/useful if child nodes didn't point at the same fan
   fanRef = unsafeLazy ref
 
-
 makeFan :: GCompare k => NodeRef (DMap k) -> EventM (Fan k)
 makeFan ref = do
   parent <- readNodeRef ref
-  f <- Fan parent <$> newRef DMap.empty
+  !f <- Fan parent <$> newRef DMap.empty
 
   subscribe parent =<< FanSub <$> makeWeak f
   return f
@@ -597,20 +594,19 @@ lookupFan nodesRef k create = do
   case maybeNode of
     Just node -> return node
     Nothing   -> do
-      (node, finalizer)  <- create
+      (!node, finalizer)  <- create
       liftIO $ do
         weakNode <- WeakNode <$> makeWeakFin node finalizer
         writeRef nodesRef (DMap.insert (WrapArg k) weakNode nodes)
         return node
 
-
 makeFanNode :: GCompare k => FanRef k -> k a -> EventM (Node a)
 makeFanNode fanRef k = do
-  f@(Fan parent nodes) <- readLazy makeFan fanRef
-  lookupFan nodes k $ do
-    height <- readHeight parent
+  f <- readLazy makeFan fanRef
+  lookupFan (fanNodes f) k $ do
+    height <- readHeight (fanParent f)
     node <- newNode height (NodeFan f k)
-    readNode parent >>= traverse_ (writeOcc node)
+    readNode (fanParent f) >>= traverse_ (writeOcc node)
     return (node, Nothing)
 
   where
@@ -690,6 +686,7 @@ forSubs :: MonadIORef m =>  Node a -> (Subscription a -> m Bool) -> m ()
 forSubs node f = traverseSubs f node
 
 -- | Event propagation
+{-# INLINE writePropagate #-}
 writePropagate ::  Height -> Node a -> a -> EventM ()
 writePropagate  height node value = do
   writeNode node value
@@ -714,13 +711,13 @@ aliveWeak = liftIO . fmap isJust . deRefWeak
 
 
 propagate :: forall a. Height -> Node a -> a -> EventM ()
-propagate  height node value = traverseSubs propagate' node where
+propagate  height !node !value = traverseSubs propagate' node where
 
   propagate' :: Subscription a -> EventM Bool
-  propagate' (PushSub w)  = forWeak w $ \p ->
+  propagate' (PushSub !w)  = forWeak w $ \(!p) ->
     pushCompute p value >>= traverse_ (writePropagate height (pushNode p))
 
-  propagate' (MergeSub w k) = forWeak w $ \m -> do
+  propagate' (MergeSub !w !k) = forWeak w $ \(!m) -> do
     partial <- readRef (mergePartial m)
     writeRef (mergePartial m) $ DMap.insert k value partial
     when (DMap.null partial) $ delayMerge m =<< readHeight (mergeNode m)

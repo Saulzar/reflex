@@ -50,9 +50,20 @@ testCases =
       return (attachWith (++) (map toUpper <$> b1) e)
 
   , testE "leftmost" $ liftA2 leftmost2 events1 events2
+
+  , testE "appendEvents-1" $ liftA2 appendEvents events1 events2
+  , testE "appendEvents-2" $ liftA2 appendEvents events3 events2
+
   , testE "onceE-1" $ do
       e <- events1
       onceE $ leftmost [e, e]
+
+
+  , testE "onceE-2" $ do
+      e <- events1
+      b <- hold never (e <$ e)
+      onceE $ switch b
+
 
   , testE "switch-1" $ do
       e <- events1
