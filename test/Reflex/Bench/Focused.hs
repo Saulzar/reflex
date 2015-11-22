@@ -43,6 +43,11 @@ occasional n period frames = traverse plan $ zipWith occs [1..] phases
 
 
 
+-- Event which never fires (but isn't 'never')
+never' :: TestPlan t m => m (Event t Word)
+never' = plan []
+
+
 -- Event which fires once on first frame
 event :: TestPlan t m => m (Event t Word)
 event = plan [(1, 0)]
@@ -204,7 +209,7 @@ merging n =
 
   where
     sparse :: TestPlan t m => m [Event t Word]
-    sparse = fmap (fmap (+1)) <$> occasional n 4 n
+    sparse = fmap (fmap (+1)) <$> occasional n 8 n
 
     counters :: TestPlan t m => m [Behavior t Int]
     counters = countMany =<< sparse
