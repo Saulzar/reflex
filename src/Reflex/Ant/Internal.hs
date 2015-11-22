@@ -82,7 +82,7 @@ type Height = Int
 
 data Subscription a where
   PushSub   :: Weak (Push a b)                     -> Subscription a
-  MergeSub  :: GCompare k => Weak (Merge k) -> k a -> Subscription a
+  MergeSub  :: GCompare k => !(Weak (Merge k)) -> !(k a) -> Subscription a
   FanSub    :: GCompare k => Weak (Fan k)          -> Subscription (DMap k)
   HoldSub   :: Weak (Hold a)                       -> Subscription a
   SwitchSub :: Weak (Switch a)                     -> Subscription a
@@ -522,8 +522,7 @@ merge events = case catEvents (DMap.toAscList events) of
 makeMerge :: forall k. GCompare k =>  [DSum (WrapArg NodeRef k)] -> EventM (Node (DMap k))
 makeMerge refs = do
   parents <- traverseDSums readNodeRef refs
-  height <- maximum  <$> sequence (mapDSums readHeight parents)
-  values <- catDSums <$> traverseDSums readNode parents
+  height <-  maximum  <$> sequence (mapDSums readHeight parents)
 
   rec
     m    <- Merge node (DMap.fromDistinctAscList parents) <$> newRef DMap.empty
@@ -533,8 +532,11 @@ makeMerge refs = do
     weak <- makeWeak m
     traverse_ (subscribeMerge weak) parents
 
+
+  values <-  catDSums <$> traverseDSums readNode parents
   when (not (null values)) $
     writeNode node (DMap.fromDistinctAscList values)
+
   return node
     where
       subscribeMerge :: Weak (Merge k) -> DSum (WrapArg Node k) -> IO ()
@@ -730,7 +732,7 @@ propagate  height !node !value = traverseSubs propagate' node where
   propagate' (PushSub !w)  = forWeak w $ \(!p) ->
     pushCompute p value >>= traverse_ (writePropagate height (pushNode p))
 
-  propagate' (MergeSub !w !k) = forWeak w $ \m -> do
+  propagate' (MergeSub !w !k) = forWeak w $ \(!m) -> do
     partial <- readRef (mergePartial m)
     writeRef (mergePartial m) $ DMap.insert k value partial
     when (DMap.null partial) $ delayMerge m =<< readHeight (mergeNode m)
@@ -963,15 +965,15 @@ traverseDSums f = traverse (\(WrapArg k :=> v) -> (WrapArg k :=>) <$> f v)
 mapDSums :: (forall a. f a -> b) -> [DSum (WrapArg f k)] -> [b]
 mapDSums f = map (\(WrapArg _ :=> v) -> f v)
 
-
 mapDMap :: (forall a. f a -> b) -> DMap (WrapArg f k) -> [b]
 mapDMap f = mapDSums f . DMap.toList
 
 
+{-# INLINE catDSums #-}
 catDSums :: [DSum (WrapArg Maybe k)] -> [DSum k]
 catDSums = catMaybes . map toMaybe
 
-
+{-# INLINE toMaybe #-}
 toMaybe :: DSum (WrapArg Maybe k)  -> Maybe (DSum k)
 toMaybe (WrapArg k :=> Just v ) = Just (k :=> v)
 toMaybe _ = Nothing
