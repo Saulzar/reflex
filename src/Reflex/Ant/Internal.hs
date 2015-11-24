@@ -248,7 +248,7 @@ unsafeCreateEvent = Event . NodeRef . unsafeLazy
 createEvent  :: MakeNode a -> IO (Event a)
 createEvent create = Event <$> makeNode create
 
-
+{-# INLINE readLazy #-}
 readLazy :: MonadIORef m => (a -> m b) -> LazyRef a b -> m b
 readLazy create ref = readRef ref >>= \case
     Left a -> do
@@ -257,7 +257,7 @@ readLazy create ref = readRef ref >>= \case
       return node
     Right node -> return node
 
-{-# INLINE readNodeRef #-}
+{-# NOINLINE readNodeRef #-}
 readNodeRef :: NodeRef a -> EventM (Node a)
 readNodeRef (NodeRef ref) = readLazy createNode ref
 
@@ -297,14 +297,14 @@ makeWeak !a finalizer = liftIO $ mkWeakPtr a finalizer
 {-# INLINE subscribe #-}
 subscribe :: MonadIORef m => Node a -> Subscription a -> m (Weak (Subscription a))
 subscribe node sub = liftIO $ do
-  weakSub <- makeWeak sub (Just $ print sub)
+  weakSub <- makeWeak sub Nothing
   modifyRef (nodeSubs node) (weakSub :)
   return weakSub
 
 {-# INLINE subscribe_ #-}
 subscribe_ :: MonadIORef m => Node a -> Subscription a -> m ()
 subscribe_ node sub = liftIO $ do
-  weakSub <- makeWeak sub (Just $ print sub)
+  weakSub <- makeWeak sub Nothing
   modifyRef (nodeSubs node) (weakSub :)
 
 {-# INLINE createNode #-}
@@ -658,8 +658,8 @@ makeFanNode fanRef k = do
   lookupFan (fanNodes f) k $ do
     height <- readHeight (fanParent f)
 
-    !node <- newNode height (NodeFan f k)
-    weak <- makeWeak node (Just $ print "dead")
+    node <- newNode height (NodeFan f k)
+    weak <- makeWeak node Nothing
 
     readNode (fanParent f) >>= traverse_ (writeOcc node)
     return (node, weak)

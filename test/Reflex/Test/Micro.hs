@@ -11,6 +11,8 @@ import Data.Char
 import Data.Monoid
 import Data.Functor.Misc
 
+import Data.Foldable
+
 import Data.Map (Map)
 import qualified Data.Map as Map
 
@@ -192,12 +194,21 @@ testCases =
       return (mergeList es)
 
   , testE "fan-3" $ do
-      e <- fmap toMap <$> events3
-      return $  select (fanMap e) (Const2 'c')
+      f <- fanMap <$> fmap toMap <$> events3
+      return $  select f (Const2 'c')
 
   , testE "fan-4" $ do
       e <- fmap toMap <$> events1
-      return $ toUpper <$> select (fanMap e) (Const2 'e')
+      return $ toUpper <$> select (fanMap e) (Const2 'a')
+
+  , testE "fan-5" $ do
+      e <- fmap toMap <$> events2
+      return $ toUpper <$> select (fanMap e) (Const2 'c')
+
+  , testE "fan-6" $ do
+      f <- fanMap <$> fmap toMap <$> events1
+      return $ toList <$> mergeList [ select f (Const2 'b'), select f (Const2 'b'), select f (Const2 'e'), select f (Const2 'e') ]
+
 
   ] where
 

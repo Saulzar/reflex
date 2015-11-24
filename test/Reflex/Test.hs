@@ -35,16 +35,14 @@ import Prelude
 
 testAgreement :: TestCase -> IO Bool
 testAgreement (TestE plan) = do
-  spider <- runSpiderHost $ runTestE plan
   ant    <- runAntHost $ runTestE plan
-  let results = [("spider", spider), ("ant", ant)]
+  let results = [ ("ant", ant)]
 
   compareResult results (testEvent $ runPure plan)
 
 testAgreement (TestB plan) = do
-  spider <- runSpiderHost $ runTestB plan
   ant    <- runAntHost $ runTestB plan
-  let results = [("spider", spider), ("ant", ant)]
+  let results = [ ("ant", ant)]
 
   compareResult results (testBehavior $ runPure plan)
 
