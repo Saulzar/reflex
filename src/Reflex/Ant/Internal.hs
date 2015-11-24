@@ -291,12 +291,12 @@ readEvent :: EventHandle a -> IO (Maybe a)
 readEvent (EventHandle n) = join <$> traverse readNode n
 
 {-# INLINE makeWeak #-}
-makeWeak :: a -> Maybe (IO ()) -> IO (Weak a)
-makeWeak (!a) finalizer = mkWeakPtr a finalizer
+makeWeak :: MonadIO m => a -> Maybe (IO ()) -> m (Weak a)
+makeWeak !a finalizer = liftIO $ mkWeakPtr a finalizer
 
 {-# INLINE subscribe #-}
 subscribe :: MonadIORef m => Node a -> Subscription a -> m (Weak (Subscription a))
-subscribe node sub = liftIO $ do
+subscribe node !sub = liftIO $ do
   weakSub <- makeWeak sub Nothing
   modifyRef (nodeSubs node) (weakSub :)
   return weakSub
@@ -457,7 +457,7 @@ makeSwitch source =  do
         let s   = Switch node sub connRef inv source
             sub = SwitchSub s
 
-        inv  <- liftIO $ SwitchInv <$> makeWeak s Nothing
+        inv  <- SwitchInv <$> makeWeak s Nothing
         node <- newNode 0 (NodeSwitch s)
       return (node, s)
 
@@ -552,12 +552,16 @@ merge events = case catEvents (DMap.toAscList events) of
   [] -> Never
   refs -> unsafeCreateEvent (MakeMerge refs)
 
-{-# INLINE mergeSubscribing #-}
-mergeSubscribing :: GCompare k =>  Merge k -> DSum (WrapArg Node k) -> IO (DSum (WrapArg MergeParent k))
-mergeSubscribing  m (WrapArg k :=> parent) = do
+{-# INLINE mergeParent #-}
+mergeParent :: GCompare k =>  Merge k -> DSum (WrapArg NodeRef k) -> EventM (DSum (WrapArg MergeParent k), Height, Maybe (DSum k))
+mergeParent  m (WrapArg !k :=> nodeRef) = do
+  parent <- readNodeRef nodeRef
+  height <- readHeight parent
+  value <- readNode parent
   subscribe_ parent sub
-  return (WrapArg k :=> MergeParent parent sub)
-    where sub = MergeSub m k
+
+  return (WrapArg k :=> MergeParent parent sub, height, (k :=>) <$> value)
+    where !sub = MergeSub m k
 
 
 makeMerge :: GCompare k => [DSum (WrapArg NodeRef k)] -> EventM (Node (DMap k))
@@ -568,17 +572,15 @@ makeMerge refs = do
 {-# INLINE makeMerge' #-}
 makeMerge' :: GCompare k => Parent (DMap k) -> [DSum (WrapArg NodeRef k)] -> EventM (Merge k)
 makeMerge' parent refs = do
-  parents <- traverseDSums readNodeRef refs
-  height <- maximum <$> sequence (mapDSums readHeight parents)
-
   rec
-    subs   <- liftIO $ traverse (mergeSubscribing m) parents
+    (subs, heights, vals)   <- unzip3 <$> traverse (mergeParent m) refs
+    node <- newNode (succ $ foldl' (+) 0 heights) parent
     m <- Merge node <$> newRef (DMap.fromDistinctAscList subs) <*> newRef DMap.empty
-    node <- newNode (succ height) parent
 
-  values <- catDSums <$> traverseDSums readNode parents
+  let values = catMaybes vals
   when (not  (null values)) $ writeNode node (DMap.fromDistinctAscList values)
   return m
+
 
 {-# INLINE never #-}
 never :: Event a
@@ -644,10 +646,9 @@ lookupFan nodesRef k create = do
     Just node -> return node
     Nothing   -> do
       (node, finalizer)  <- create
-      liftIO $ do
-        weakNode <- WeakNode <$> mkWeakPtr node finalizer
-        writeRef nodesRef (DMap.insert (WrapArg k) weakNode nodes)
-        return node
+      weakNode <- WeakNode <$> makeWeak node finalizer
+      writeRef nodesRef (DMap.insert (WrapArg k) weakNode nodes)
+      return node
 
 
 
