@@ -273,7 +273,7 @@ readHeight node = readRef (nodeHeight node)
 {-# INLINE newNode #-}
 newNode :: MonadIO m => Height -> Parent a -> m (Node a)
 newNode height parents = liftIO $
-  Node <$> newRef [] <*> newRef height <*> pure parents <*> newRef Nothing
+    Node <$> newRef [] <*> newRef height <*> pure parents <*> newRef Nothing
 
 
 {-# INLINE readNode #-}
@@ -296,14 +296,16 @@ makeWeak !a finalizer = liftIO $ mkWeakPtr a finalizer
 
 {-# INLINE subscribe #-}
 subscribe :: MonadIORef m => Node a -> Subscription a -> m (Weak (Subscription a))
-subscribe node !sub = liftIO $ do
-  weakSub <- makeWeak sub Nothing
+subscribe node sub = liftIO $ do
+  weakSub <- makeWeak sub (Just $ print sub)
   modifyRef (nodeSubs node) (weakSub :)
   return weakSub
 
 {-# INLINE subscribe_ #-}
 subscribe_ :: MonadIORef m => Node a -> Subscription a -> m ()
-subscribe_ node = void . subscribe node
+subscribe_ node sub = liftIO $ do
+  weakSub <- makeWeak sub (Just $ print sub)
+  modifyRef (nodeSubs node) (weakSub :)
 
 {-# INLINE createNode #-}
 createNode :: MakeNode a -> EventM (Node a)
@@ -561,7 +563,7 @@ mergeParent  m (WrapArg !k :=> nodeRef) = do
   subscribe_ parent sub
 
   return (WrapArg k :=> MergeParent parent sub, height, (k :=>) <$> value)
-    where !sub = MergeSub m k
+    where sub = MergeSub m k
 
 
 makeMerge :: GCompare k => [DSum (WrapArg NodeRef k)] -> EventM (Node (DMap k))
@@ -637,7 +639,7 @@ cleanKey nodesRef k = do
       writeRef nodesRef (DMap.delete (WrapArg k) nodes)
 
 -- Lookup a weak node cache, and create it if it doesn't exist (or has been GC'ed)
-lookupFan :: (GCompare k, MonadIORef m) => IORef (DMap (WrapArg WeakNode k)) -> k a -> m (Node a, Maybe (IO ())) -> m (Node a)
+lookupFan :: (GCompare k, MonadIORef m) => IORef (DMap (WrapArg WeakNode k)) -> k a -> m (Node a, Weak (Node a)) -> m (Node a)
 lookupFan nodesRef k create = do
   nodes     <- readRef nodesRef
   maybeNode <- liftIO (lookupWeakNode nodes k)
@@ -645,21 +647,22 @@ lookupFan nodesRef k create = do
   case maybeNode of
     Just node -> return node
     Nothing   -> do
-      (node, finalizer)  <- create
-      weakNode <- WeakNode <$> makeWeak node finalizer
-      writeRef nodesRef (DMap.insert (WrapArg k) weakNode nodes)
+      (node, weak)  <- create
+      writeRef nodesRef (DMap.insert (WrapArg k) (WeakNode weak) nodes)
       return node
-
 
 
 makeFanNode :: GCompare k => FanRef k -> k a -> EventM (Node a)
 makeFanNode fanRef k = do
-  f@(Fan parent _ nodes) <- readLazy makeFan fanRef
-  lookupFan nodes k $ do
-    height <- readHeight parent
-    node <- newNode height (NodeFan f k)
-    readNode parent >>= traverse_ (writeOcc node)
-    return (node, Nothing)
+  f <- readLazy makeFan fanRef
+  lookupFan (fanNodes f) k $ do
+    height <- readHeight (fanParent f)
+
+    !node <- newNode height (NodeFan f k)
+    weak <- makeWeak node (Just $ print "dead")
+
+    readNode (fanParent f) >>= traverse_ (writeOcc node)
+    return (node, weak)
 
   where
     writeOcc node occ = traverse_ (writeNode node) (DMap.lookup k occ)
@@ -689,7 +692,9 @@ makeRoot :: GCompare k => k a -> Root k -> EventM (Node a)
 makeRoot k (Root nodes subscr) = liftIO $ lookupFan nodes k $ do
   node       <- newNode 0 NodeRoot
   finalizer  <- subscr  k (Trigger node)
-  return (node, Just finalizer)
+  weak <- makeWeak node (Just finalizer)
+
+  return (node, weak)
 
 {-# INLINE traverseWeakSubs #-}
 traverseWeakSubs :: MonadIORef m => (Subscription a -> m ()) -> [Weak (Subscription a)] -> m [Weak (Subscription a)]

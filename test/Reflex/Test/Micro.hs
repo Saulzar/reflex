@@ -191,9 +191,13 @@ testCases =
 
       return (mergeList es)
 
-  , testE "fan-2" $ do
+  , testE "fan-3" $ do
       e <- fmap toMap <$> events3
-      return $  select (fanMap e) (Const2 'b')
+      return $  select (fanMap e) (Const2 'c')
+
+  , testE "fan-4" $ do
+      e <- fmap toMap <$> events1
+      return $ toUpper <$> select (fanMap e) (Const2 'e')
 
   ] where
 
