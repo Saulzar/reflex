@@ -70,7 +70,7 @@ benchmark bench
   type: exitcode-stdio-1.0
   hs-source-dirs: bench test
   main-is: RunAll.hs
-  ghc-options: -O2 -Wall
+  ghc-options: -O2 -Wall 
   build-depends:
     base,
     containers,

@@ -62,6 +62,8 @@ class MonadSample t m => MonadHold t m where
   -- | Create a new Behavior whose value will initially be equal to the given value and will be updated whenever the given Event occurs
   hold :: a -> Event t a -> m (Behavior t a)
 
+  switchMerge :: DMap (WrapArg (Event t) k) -> Event t (DMap (WrapArg (Event t) k)) -> m (Event t (DMap k))
+
 newtype EventSelector t k = EventSelector { select :: forall a. k a -> Event t a }
 
 --------------------------------------------------------------------------------
@@ -331,13 +333,13 @@ leftmost = mergeWith const
 
 -- | Create a new 'Event' that occurs if at least one of the 'Event's
 -- in the list occurs and has a list of the values of all 'Event's
--- occuring at that time.       
+-- occuring at that time.
 mergeList :: Reflex t => [Event t a] -> Event t (NonEmpty a)
 mergeList es = fromDMap <$> merge (eventDMap es) where
-  
+
   eventDMap :: [Event t a] -> DMap (WrapArg (Event t) (Const2 Int a))
   eventDMap es = DMap.fromDistinctAscList (map (\(k, v) -> WrapArg (Const2 k) :=> v) (zip [0 :: Int ..] es))
-  
+
   fromDMap :: DMap (Const2 Int a) -> NonEmpty a
   fromDMap = NE.fromList . map (\(Const2 _ :=> v) -> v) . DMap.toList
 

@@ -53,6 +53,7 @@ data MakeNode a where
   MakeCoincidence :: !(NodeRef (Event a)) -> MakeNode a
   MakeRoot        :: GCompare k => k a -> Root k -> MakeNode a
   MakeMerge       :: GCompare k => [DSum (WrapArg NodeRef k)] -> MakeNode (DMap k)
+  MakeSwitchMerge :: GCompare k => [DSum (WrapArg NodeRef k)] -> NodeRef (DMap (WrapArg Event k)) -> MakeNode (DMap k)
   MakeFan         :: GCompare k => k a -> FanRef k -> MakeNode a
 
 
@@ -82,6 +83,7 @@ type Height = Int
 data Subscription a where
   PushSub   :: Push a b -> Subscription a
   MergeSub  :: GCompare k => Merge k -> !(k a) -> Subscription a
+  SwitchMergeSub :: GCompare k => Merge k -> Subscription (DMap (WrapArg Event k))
   FanSub    :: GCompare k => Fan k -> Subscription (DMap k)
   HoldSub   :: Node a -> Hold a -> Subscription a
   SwitchSub :: Switch a -> Subscription a
@@ -102,6 +104,7 @@ data Parent a where
   NodePush   :: Push a b      -> Parent b
   NodeMerge  :: Merge k       -> Parent (DMap k)
   NodeSwitch :: Switch a      -> Parent a
+  NodeSwitchMerge :: SwitchMerge k -> Parent (DMap k)
   NodeCoin   :: Coincidence a -> Parent a
   NodeFan    :: Fan k -> k a  -> Parent a
   NodeRoot   ::                  Parent a
@@ -156,13 +159,18 @@ data Coincidence a = Coincidence
   }
 
 
-data MergeParent k a where
-  MergeParent      :: Node a -> (Subscription a) -> MergeParent k a
+data MergeParent a where
+  MergeParent      :: Node a -> (Subscription a) -> MergeParent a
 
 data Merge k = Merge
   { mergeNode     :: (Node (DMap k))
-  , mergeParents  :: DMap (WrapArg (MergeParent k) k)
+  , mergeParents  :: !(IORef (DMap (WrapArg MergeParent k)))
   , mergePartial  :: !(IORef (DMap k))
+  }
+
+data SwitchMerge (k :: * -> *)  = SwitchMerge
+  { smMerge :: Merge k
+  , smSub   :: Subscription (DMap (WrapArg Event k))
   }
 
 newtype WeakNode a = WeakNode { unWeakNode :: Weak (Node a) }
@@ -301,6 +309,7 @@ subscribe_ node = void . subscribe node
 createNode :: MakeNode a -> EventM (Node a)
 createNode (MakePush ref f)      = makePush ref f
 createNode (MakeMerge refs)      = makeMerge refs
+createNode (MakeSwitchMerge initial updates) = makeSwitchMerge initial updates
 createNode (MakeSwitch b)        = makeSwitch b
 createNode (MakeCoincidence ref) = makeCoincidence ref
 createNode (MakeRoot root k)     = makeRoot root k
@@ -521,34 +530,55 @@ makePush ref f =  do
   subscribe_ parent sub
   return node
 
-{-# INLINE merge #-}
+
+makeSwitchMerge :: GCompare k => [DSum (WrapArg NodeRef k)] -> NodeRef (DMap (WrapArg Event k)) -> EventM (Node (DMap k))
+makeSwitchMerge initial updates = do
+  parent <- readNodeRef updates
+  value <- readNode parent
+
+  rec
+    let sub = SwitchMergeSub m
+        sm = SwitchMerge m sub
+
+    m <- makeMerge' (NodeSwitchMerge sm) initial
+
+  traverse_  (modifyMerge m) value
+  subscribe parent sub
+  return (mergeNode m)
+
+
 merge :: GCompare k => DMap (WrapArg Event k) -> Event (DMap k)
 merge events = case catEvents (DMap.toAscList events) of
   [] -> Never
   refs -> unsafeCreateEvent (MakeMerge refs)
 
 {-# INLINE mergeSubscribing #-}
-mergeSubscribing :: GCompare k =>  Merge k -> DSum (WrapArg Node k) -> IO (DSum (WrapArg (MergeParent k) k))
-mergeSubscribing  merge' (WrapArg k :=> parent) = do
+mergeSubscribing :: GCompare k =>  Merge k -> DSum (WrapArg Node k) -> IO (DSum (WrapArg MergeParent k))
+mergeSubscribing  m (WrapArg k :=> parent) = do
   subscribe_ parent sub
   return (WrapArg k :=> MergeParent parent sub)
-    where sub = MergeSub merge' k
+    where sub = MergeSub m k
 
 
-makeMerge :: GCompare k =>  [DSum (WrapArg NodeRef k)] -> EventM (Node (DMap k))
+makeMerge :: GCompare k => [DSum (WrapArg NodeRef k)] -> EventM (Node (DMap k))
 makeMerge refs = do
+  rec m <- makeMerge' (NodeMerge m) refs
+  return (mergeNode m)
+
+{-# INLINE makeMerge' #-}
+makeMerge' :: GCompare k => Parent (DMap k) -> [DSum (WrapArg NodeRef k)] -> EventM (Merge k)
+makeMerge' parent refs = do
   parents <- traverseDSums readNodeRef refs
   height <- maximum <$> sequence (mapDSums readHeight parents)
 
   rec
-    subs   <- liftIO $ traverse (mergeSubscribing merge') parents
-    merge' <- Merge node (DMap.fromDistinctAscList subs) <$> newRef DMap.empty
-    node <- newNode (succ height) (NodeMerge merge')
-
+    subs   <- liftIO $ traverse (mergeSubscribing m) parents
+    m <- Merge node <$> newRef (DMap.fromDistinctAscList subs) <*> newRef DMap.empty
+    node <- newNode (succ height) parent
 
   values <- catDSums <$> traverseDSums readNode parents
   when (not  (null values)) $ writeNode node (DMap.fromDistinctAscList values)
-  return node
+  return m
 
 {-# INLINE never #-}
 never :: Event a
@@ -700,6 +730,11 @@ delayHold :: Hold a -> a -> EventM ()
 delayHold h value = do
   holdsRef <- asks envHolds
   modifyRef holdsRef (WriteHold h value:)
+
+
+modifyMerge :: Merge k -> DMap (WrapArg Event k) -> EventM ()
+modifyMerge m update = return ()
+
 
 {-# INLINE delayInitHold #-}
 delayInitHold :: Hold a -> EventM ()

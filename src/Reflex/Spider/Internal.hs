@@ -1376,7 +1376,7 @@ newtype SpiderHostFrame a = SpiderHostFrame { runSpiderHostFrame :: EventM a } d
 
 instance R.MonadSample Spider SpiderHostFrame where
   sample = SpiderHostFrame . R.sample --TODO: This can cause problems with laziness, so we should get rid of it if we can
-  
+
 instance R.MonadHold Spider SpiderHostFrame where
   {-# INLINE hold #-}
   hold v0 e = SpiderHostFrame $ R.hold v0 e
