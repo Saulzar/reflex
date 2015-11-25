@@ -6,6 +6,8 @@ module Reflex.TestPlan
   , testE, testB
   , TestE, TestB
 
+  , planList
+
   ) where
 
 import Reflex.Class
@@ -23,6 +25,9 @@ class (Reflex t, MonadHold t m, MonadFix m) => TestPlan t m where
 
   plan :: [(Word, a)] -> m (Event t a)
 
+
+planList :: TestPlan t m => [a] -> m (Event t a)
+planList xs = plan $ zip [1..] xs
 
 type TestE a = forall t m. TestPlan t m => m (Event t a)
 type TestB a = forall t m. TestPlan t m => m (Behavior t a)

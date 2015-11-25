@@ -32,6 +32,7 @@ liftPlan = PurePlan . lift
 
 instance MonadHold (Pure Int) PurePlan where
   hold initial  = liftPlan . hold initial
+  switchMerge e0 = liftPlan . switchMerge e0
 
 instance MonadSample (Pure Int) PurePlan where
   sample = liftPlan . sample

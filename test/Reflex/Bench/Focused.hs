@@ -137,8 +137,6 @@ holdMap :: (Reflex t, MonadHold t m, MonadFix m, Ord k) => UpdatedMap t k a -> m
 holdMap = (current <$>) . holdMapDyn
 
 
-planList :: TestPlan t m => [a] -> m (Event t a)
-planList xs = plan $ zip [1..] xs
 
 increasingMerge :: TestPlan t m => [a] -> m (UpdatedMap t Int a)
 increasingMerge xs = do

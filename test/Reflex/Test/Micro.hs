@@ -3,7 +3,6 @@
 module Reflex.Test.Micro (testCases) where
 
 import Reflex
-import Reflex.Dynamic
 import Reflex.TestPlan
 
 import Control.Applicative
@@ -21,7 +20,10 @@ import Prelude
 testCases :: [(String, TestCase)]
 testCases =
   [ testB "hold"  $ hold "0" =<< events1
-  , testB "count" $ current <$> (count =<< events2)
+  , testB "count" $ do
+    b <- current <$> (count =<< events2)
+    return $ (+ (0::Int)) <$> b
+
   , testB "pull-1"  $ do
       b <- hold "0" =<< events1
       return (id <$> id <$> b)
@@ -89,7 +91,7 @@ testCases =
   , testE "switchPromptly-1" $ do
       e <- events1
       let e' = e <$ e
-      switchPromptly never $ e <$ e
+      switchPromptly never $ e <$ e'
 
   , testE "switchPromptly-2" $ do
       e <- events1
@@ -209,14 +211,24 @@ testCases =
       f <- fanMap <$> fmap toMap <$> events1
       return $ toList <$> mergeList [ select f (Const2 'b'), select f (Const2 'b'), select f (Const2 'e'), select f (Const2 'e') ]
 
+  , testE "switchMerge-1" $ switchMergeMap mempty =<< increasing
+
 
   ] where
 
-    events1, events2, events3 :: forall t m. TestPlan t m => m (Event t String)
+    events1, events2, events3 ::  TestPlan t m => m (Event t String)
     events1 = plan [(1, "a"), (2, "b"), (5, "c"), (7, "d"), (8, "e")]
     events2 = plan [(1, "e"), (3, "d"), (4, "c"), (6, "b"), (7, "a")]
 
     events3 = liftA2 appendEvents events1 events2
+
+    eventsFrom ::  TestPlan t m => Word -> m (Event t Int)
+    eventsFrom n = plan $ zip [n..8] [1..8]
+
+    increasing :: TestPlan t m => m (Event t (Map Int (Event t Int)))
+    increasing = do
+      es <- mapM eventsFrom [1..8]
+      planList $ zipWith Map.singleton [1..8] es
 
     values = "abcde"
     toMap str = Map.fromList $ map (\c -> (c, c)) str

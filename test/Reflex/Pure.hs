@@ -8,6 +8,7 @@ and laziness/strictness may differ.
 module Reflex.Pure where
 
 import Reflex.Class
+import Reflex.Dynamic
 import Data.Functor.Misc
 
 import Control.Monad
@@ -74,3 +75,9 @@ instance (Enum t, HasTrie t, Ord t) => MonadHold (Pure t) ((->) t) where
                  in case unEvent e lastTime of
                    Nothing -> f lastTime
                    Just x  -> x
+
+  switchMerge initial updates = do
+    es <- current <$> foldDyn DMap.union initial updates
+    return (switch $ merge <$> es)
+
+

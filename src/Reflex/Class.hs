@@ -62,7 +62,7 @@ class MonadSample t m => MonadHold t m where
   -- | Create a new Behavior whose value will initially be equal to the given value and will be updated whenever the given Event occurs
   hold :: a -> Event t a -> m (Behavior t a)
 
-  switchMerge :: DMap (WrapArg (Event t) k) -> Event t (DMap (WrapArg (Event t) k)) -> m (Event t (DMap k))
+  switchMerge :: GCompare k => DMap (WrapArg (Event t) k) -> Event t (DMap (WrapArg (Event t) k)) -> m (Event t (DMap k))
 
 newtype EventSelector t k = EventSelector { select :: forall a. k a -> Event t a }
 
@@ -75,36 +75,42 @@ instance MonadSample t m => MonadSample t (ReaderT r m) where
 
 instance MonadHold t m => MonadHold t (ReaderT r m) where
   hold a0 = lift . hold a0
+  switchMerge e0  = lift . switchMerge e0
 
 instance (MonadSample t m, Monoid r) => MonadSample t (WriterT r m) where
   sample = lift . sample
 
 instance (MonadHold t m, Monoid r) => MonadHold t (WriterT r m) where
   hold a0 = lift . hold a0
+  switchMerge e0  = lift . switchMerge e0
 
 instance MonadSample t m => MonadSample t (StateT s m) where
   sample = lift . sample
 
 instance MonadHold t m => MonadHold t (StateT s m) where
   hold a0 = lift . hold a0
+  switchMerge e0  = lift . switchMerge e0
 
 instance MonadSample t m => MonadSample t (ExceptT e m) where
   sample = lift . sample
 
 instance MonadHold t m => MonadHold t (ExceptT e m) where
   hold a0 = lift . hold a0
+  switchMerge e0  = lift . switchMerge e0
 
 instance (MonadSample t m, Monoid w) => MonadSample t (RWST r w s m) where
   sample = lift . sample
 
 instance (MonadHold t m, Monoid w) => MonadHold t (RWST r w s m) where
   hold a0 = lift . hold a0
+  switchMerge e0  = lift . switchMerge e0
 
 instance MonadSample t m => MonadSample t (ContT r m) where
   sample = lift . sample
 
 instance MonadHold t m => MonadHold t (ContT r m) where
   hold a0 = lift . hold a0
+  switchMerge e0  = lift . switchMerge e0
 
 --------------------------------------------------------------------------------
 -- Convenience functions
@@ -348,6 +354,10 @@ mergeList es = fromDMap <$> merge (eventDMap es) where
 -- values of all 'Event's occuring at that time.
 mergeMap :: (Reflex t, Ord k) => Map k (Event t a) -> Event t (Map k a)
 mergeMap = fmap dmapToMap . merge . mapWithFunctorToDMap
+
+
+switchMergeMap :: (Reflex t, MonadHold t m, Ord k) => Map k (Event t a) -> Event t (Map k (Event t a)) -> m (Event t (Map k a))
+switchMergeMap initial upds = fmap dmapToMap <$> switchMerge (mapWithFunctorToDMap initial) (mapWithFunctorToDMap <$> upds)
 
 -- | Split the event into an 'EventSelector' that allows efficient
 -- selection of the individual 'Event's.

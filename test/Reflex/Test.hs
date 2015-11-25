@@ -9,24 +9,18 @@ module Reflex.Test
 
   ) where
 
-import Reflex
-import Reflex.Host.Class
-
 import Reflex.Ant
 
 import Reflex.TestPlan
 
-import Reflex.Pure
 import Reflex.Plan.Pure
 import Reflex.Plan.Reflex
 
 import Control.Monad
 import Data.Monoid
 
-import Control.Applicative
 import Data.IntMap (IntMap)
 
-import Data.Traversable
 import Data.Foldable
 import System.Exit
 

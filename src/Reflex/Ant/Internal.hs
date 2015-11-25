@@ -53,7 +53,6 @@ data MakeNode a where
   MakeCoincidence :: !(NodeRef (Event a)) -> MakeNode a
   MakeRoot        :: GCompare k => k a -> Root k -> MakeNode a
   MakeMerge       :: GCompare k => [DSum (WrapArg NodeRef k)] -> MakeNode (DMap k)
-  MakeSwitchMerge :: GCompare k => [DSum (WrapArg NodeRef k)] -> NodeRef (DMap (WrapArg Event k)) -> MakeNode (DMap k)
   MakeFan         :: GCompare k => k a -> FanRef k -> MakeNode a
 
 
@@ -243,7 +242,12 @@ unsafeLazy create = unsafePerformIO $ newIORef (Left create)
 
 {-# INLINE makeNode #-}
 makeNode :: MakeNode a -> IO (NodeRef a)
-makeNode create = NodeRef <$> newIORef (Left create)
+makeNode create = NodeRef <$> newRef (Left create)
+
+
+{-# INLINE makeEvent #-}
+makeEvent :: MonadIORef m =>  m (Node a) -> m (Event a)
+makeEvent create = fmap (Event . NodeRef) $ newRef . Right =<< create
 
 {-# INLINE unsafeCreateEvent #-}
 unsafeCreateEvent :: MakeNode a -> Event a
@@ -319,7 +323,6 @@ subscribe_ node sub = liftIO $ do
 createNode :: MakeNode a -> EventM (Node a)
 createNode (MakePush ref f)      = makePush ref f
 createNode (MakeMerge refs)      = makeMerge refs
-createNode (MakeSwitchMerge initial updates) = makeSwitchMerge initial updates
 createNode (MakeSwitch b)        = makeSwitch b
 createNode (MakeCoincidence ref) = makeCoincidence ref
 createNode (MakeRoot root k)     = makeRoot root k
@@ -537,20 +540,28 @@ makePush ref f =  do
   return node
 
 
-makeSwitchMerge :: GCompare k => [DSum (WrapArg NodeRef k)] -> NodeRef (DMap (WrapArg Event k)) -> EventM (Node (DMap k))
-makeSwitchMerge initial updates = do
-  parent <- readNodeRef updates
-  value <- readNode parent
 
-  rec
-    let sub = SwitchMergeSub m
-        sm = SwitchMerge m sub
 
-    m <- makeMerge' (NodeSwitchMerge sm) initial
+switchMerge :: GCompare k => DMap (WrapArg Event k) -> Event (DMap (WrapArg Event k)) -> EventM (Event (DMap k))
+switchMerge es e = case e of
+  Never     -> liftIO $ createEvent (MakeMerge refs)
+  Event ref -> makeEvent $ do
+    parent <- readNodeRef ref
+    value <- readNode parent
 
-  traverse_  (delayConnect . ConnectMerge m) value
-  subscribe_ parent sub
-  return (mergeNode m)
+    rec
+      let sub = SwitchMergeSub m
+          sm = SwitchMerge m sub
+
+      m <- makeMerge' (NodeSwitchMerge sm) refs
+
+    traverse_  (delayConnect . ConnectMerge m) value
+    subscribe_ parent sub
+    return (mergeNode m)
+
+  where
+    refs = catEvents (DMap.toList es)
+
 
 
 merge :: GCompare k => DMap (WrapArg Event k) -> Event (DMap k)
@@ -991,7 +1002,7 @@ instance R.MonadSample Ant EventM where
 
 instance R.MonadHold Ant EventM where
   hold a (AntEvent e) = AntBehavior <$> hold a e
-
+  switchMerge i e = AntEvent <$> switchMerge (unsafeCoerce i) (unsafeCoerce e)
 
 newtype AntHost a = AntHost { runAntHost :: IO a } deriving (Functor, Applicative, Monad, MonadFix, MonadIO)
 
