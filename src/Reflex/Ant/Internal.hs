@@ -92,6 +92,7 @@ data Subscription a where
 
 instance Show (Subscription a) where
   show (PushSub   {}) = "Push"
+  show (SwitchMergeSub {}) = "SwitchMerge"
   show (MergeSub  {}) = "Merge"
   show (HoldSub   {}) = "Hold"
   show (SwitchSub {}) = "Switch"
@@ -160,11 +161,11 @@ data Coincidence a = Coincidence
 
 
 data MergeParent a where
-  MergeParent      :: Node a -> (Subscription a) -> MergeParent a
+  MergeParent      :: Node a -> Subscription a -> Weak (Subscription a) -> MergeParent a
 
 data Merge k = Merge
   { mergeNode     :: (Node (DMap k))
-  , mergeParents  :: !(IORef (DMap (WrapArg MergeParent k)))
+  , subscribeMerges  :: !(IORef (DMap (WrapArg MergeParent k)))
   , mergePartial  :: !(IORef (DMap k))
   }
 
@@ -189,9 +190,13 @@ data Root k  = Root
 -- A bunch of existentials used so we can put these things in lists
 data WriteHold      where WriteHold      :: !(Hold a)    -> !a -> WriteHold
 data HoldInit       where HoldInit       :: !(Hold a)    -> HoldInit
-data Connect        where Connect        :: !(Switch a)  -> Connect
 data DelayMerge     where DelayMerge     :: !(Merge k)   -> DelayMerge
-data CoincidenceOcc where CoincidenceOcc :: !(NodeSub a) ->  CoincidenceOcc
+data Connect        where Connect        :: !(Switch a)  -> Connect
+
+data DelayedConnect where
+  Disconnect    :: !(NodeSub a) -> DelayedConnect
+  ConnectMerge  :: GCompare k => Merge k -> DMap (WrapArg Event k) -> DelayedConnect
+
 data SomeNode       where SomeNode       :: !(Node a)    -> SomeNode
 
 
@@ -201,7 +206,7 @@ data Env = Env
   , envClears       :: !(IORef [SomeNode])
   , envHolds        :: !(IORef [WriteHold])
   , envHoldInits    :: !(IORef [HoldInit])
-  , envCoincidences :: !(IORef [CoincidenceOcc])
+  , envConnects     :: !(IORef [DelayedConnect])
   }
 
 newtype EventM a = EventM { unEventM :: ReaderT Env IO a }
@@ -248,7 +253,7 @@ unsafeCreateEvent = Event . NodeRef . unsafeLazy
 createEvent  :: MakeNode a -> IO (Event a)
 createEvent create = Event <$> makeNode create
 
-{-# INLINE readLazy #-}
+
 readLazy :: MonadIORef m => (a -> m b) -> LazyRef a b -> m b
 readLazy create ref = readRef ref >>= \case
     Left a -> do
@@ -257,7 +262,10 @@ readLazy create ref = readRef ref >>= \case
       return node
     Right node -> return node
 
-{-# NOINLINE readNodeRef #-}
+
+
+-- Don't inline this, seems to result in Node structures being optimized away
+-- playing havoc with Event fans
 readNodeRef :: NodeRef a -> EventM (Node a)
 readNodeRef (NodeRef ref) = readLazy createNode ref
 
@@ -435,7 +443,7 @@ connectC (Coincidence node parent _ innerSub) (Event ref) = do
     -- and adjust our height
     Nothing -> when (innerHeight >= height) $ do
       weakSub <- subscribe inner innerSub
-      askModifyRef envCoincidences (CoincidenceOcc (inner, weakSub):)
+      delayConnect $ Disconnect (inner, weakSub)
       liftIO $ propagateHeight innerHeight node
   return value
 
@@ -498,14 +506,10 @@ reconnect (Connect s) = do
   propagateHeight height (switchNode s)
 
 
-{-# INLINE disconnectC #-}
-disconnectC :: CoincidenceOcc -> IO ()
-disconnectC (CoincidenceOcc (_, weakSub)) = finalize weakSub
-
-connectSwitches :: [Connect] -> [CoincidenceOcc] -> IO ()
-connectSwitches connects coincidences = do
-  traverse_ disconnectC coincidences
-  traverse_ reconnect connects
+{-# INLINE connectDelayed #-}
+connectDelayed :: DelayedConnect -> IO ()
+connectDelayed (Disconnect (_, weakSub)) = finalize weakSub
+connectDelayed (ConnectMerge m u) = evalEventM $ modifyMerge m u
 
 
 
@@ -544,8 +548,8 @@ makeSwitchMerge initial updates = do
 
     m <- makeMerge' (NodeSwitchMerge sm) initial
 
-  traverse_  (modifyMerge m) value
-  subscribe parent sub
+  traverse_  (delayConnect . ConnectMerge m) value
+  subscribe_ parent sub
   return (mergeNode m)
 
 
@@ -554,15 +558,17 @@ merge events = case catEvents (DMap.toAscList events) of
   [] -> Never
   refs -> unsafeCreateEvent (MakeMerge refs)
 
-{-# INLINE mergeParent #-}
-mergeParent :: GCompare k =>  Merge k -> DSum (WrapArg NodeRef k) -> EventM (DSum (WrapArg MergeParent k), Height, Maybe (DSum k))
-mergeParent  m (WrapArg !k :=> nodeRef) = do
+type MergeInfo k = (DSum (WrapArg MergeParent k), Height, Maybe (DSum k))
+
+{-# INLINE subscribeMerge #-}
+subscribeMerge :: GCompare k =>  Merge k -> DSum (WrapArg NodeRef k) -> EventM (MergeInfo k)
+subscribeMerge  m (WrapArg !k :=> nodeRef) = do
   parent <- readNodeRef nodeRef
   height <- readHeight parent
   value <- readNode parent
-  subscribe_ parent sub
+  weak <- subscribe parent sub
 
-  return (WrapArg k :=> MergeParent parent sub, height, (k :=>) <$> value)
+  return (WrapArg k :=> MergeParent parent sub weak, height, (k :=>) <$> value)
     where sub = MergeSub m k
 
 
@@ -575,13 +581,38 @@ makeMerge refs = do
 makeMerge' :: GCompare k => Parent (DMap k) -> [DSum (WrapArg NodeRef k)] -> EventM (Merge k)
 makeMerge' parent refs = do
   rec
-    (subs, heights, vals)   <- unzip3 <$> traverse (mergeParent m) refs
-    node <- newNode (succ $ foldl' (+) 0 heights) parent
+    (subs, heights, vals)   <- unzip3 <$> traverse (subscribeMerge m) refs
+    node <- newNode (succ $ foldl' max 0 heights) parent
     m <- Merge node <$> newRef (DMap.fromDistinctAscList subs) <*> newRef DMap.empty
 
   let values = catMaybes vals
   when (not  (null values)) $ writeNode node (DMap.fromDistinctAscList values)
   return m
+
+
+modifyMerge :: forall k. GCompare k => Merge k -> DMap (WrapArg Event k) -> EventM ()
+modifyMerge m update = do
+
+  subs <- readRef (subscribeMerges m)
+  (subs', heights, _) <- unzip3 . catMaybes <$> traverse (addMerge subs)  (DMap.toList update)
+
+  height <- readHeight (mergeNode m)
+  let height' = succ $ foldl' max (pred height) heights
+  liftIO $ propagateHeight height' (mergeNode m)
+
+  modifyRef (subscribeMerges m) (DMap.union (DMap.fromDistinctAscList subs'))
+
+  where
+
+    addMerge :: DMap (WrapArg MergeParent k) -> DSum (WrapArg Event k) -> EventM (Maybe (MergeInfo k))
+    addMerge subs (WrapArg k :=> e) = do
+
+      for_ (DMap.lookup (WrapArg k) subs) $ \(MergeParent _ _ weak) -> liftIO $ finalize weak
+      case e of
+        Never      -> return Nothing
+        Event ref  -> Just <$> subscribeMerge m (WrapArg k :=> ref)
+
+
 
 
 {-# INLINE never #-}
@@ -724,29 +755,25 @@ forSubs node f = traverseSubs f node
 modifyM :: MonadRef m => Ref m a -> (a -> m a) -> m ()
 modifyM ref f = readRef ref >>= f >>= writeRef ref
 
+
 -- | Delayed operations
 delayMerge :: Merge k -> Height ->  EventM ()
-delayMerge m height = do
-  delayRef <- asks envDelays
-  modifyRef delayRef ins
+delayMerge m height = askModifyRef envDelays  ins
     where ins = IntMap.insertWith (<>) height [DelayMerge m]
 
 {-# INLINE delayHold #-}
 delayHold :: Hold a -> a -> EventM ()
-delayHold h value = do
-  holdsRef <- asks envHolds
-  modifyRef holdsRef (WriteHold h value:)
-
-
-modifyMerge :: Merge k -> DMap (WrapArg Event k) -> EventM ()
-modifyMerge m update = return ()
-
+delayHold h value = askModifyRef envHolds (WriteHold h value:)
 
 {-# INLINE delayInitHold #-}
 delayInitHold :: Hold a -> EventM ()
-delayInitHold ref = do
-  holdInitRef <- asks envHoldInits
-  modifyRef holdInitRef (HoldInit ref:)
+delayInitHold ref = askModifyRef envHoldInits (HoldInit ref:)
+
+{-# INLINE delayConnect #-}
+delayConnect :: DelayedConnect -> EventM ()
+delayConnect c = askModifyRef envConnects (c:)
+
+
 
 {-# INLINE writePropagate #-}
 -- | Event propagation
@@ -754,7 +781,6 @@ writePropagate ::  Height -> Node a -> a -> EventM ()
 writePropagate  height node value = do
   writeNode node value
   propagate height node value
-
 
 
 propagate :: forall a. Height -> Node a -> a -> EventM ()
@@ -766,6 +792,8 @@ propagate  height node value = traverseSubs propagate' node where
     partial <- readRef (mergePartial m)
     writeRef (mergePartial m) $ DMap.insert k value partial
     when (DMap.null partial) $ delayMerge m =<< readHeight (mergeNode m)
+
+  propagate' (SwitchMergeSub m) = delayConnect (ConnectMerge m value)
 
   propagate' (HoldSub _ h) =  delayHold h value
   propagate' (SwitchSub s) = writePropagate height (switchNode s) value
@@ -841,11 +869,15 @@ propagateHeight newHeight node = do
   when (height < newHeight) $ do
     writeRef (nodeHeight node) newHeight
     forSubs node $ \case
-      MergeSub m  _ -> propagateHeight (succ newHeight) (mergeNode m)
+      MergeSub m  _     -> propagateHeight (succ newHeight) (mergeNode m)
+
+      -- Event only modifies the merge after the frame, does not contribute to height
+      SwitchMergeSub _  -> return ()
       sub -> traverseDest (propagateHeight newHeight) sub
 
 traverseDest :: MonadIORef m => (forall b. Node b -> m ()) -> Subscription a -> m ()
 traverseDest f (MergeSub  m _)     = f (mergeNode m)
+traverseDest f (SwitchMergeSub m ) = f (mergeNode m)
 traverseDest f (PushSub   p)       = f (pushNode p)
 traverseDest f (SwitchSub s)       = f (switchNode s)
 traverseDest f (CoinInner c)       = f (coinNode c)
@@ -894,8 +926,8 @@ takeDelayed = asks envDelays >>= \delaysRef -> liftIO $ do
 endFrame :: Env -> IO ()
 endFrame env  = do
   traverse_ clearNode =<< readRef (envClears env)
-  connects <- writeHolds =<< readRef (envHolds env)
-  connectSwitches connects =<< readRef (envCoincidences env)
+  traverse_ reconnect =<< writeHolds =<< readRef (envHolds env)
+  traverse_ connectDelayed =<< readRef (envConnects env)
 
   where
     clearNode (SomeNode node) = writeRef (nodeOcc node) Nothing
