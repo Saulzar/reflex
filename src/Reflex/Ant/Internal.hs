@@ -170,6 +170,7 @@ data Merge k = Merge
 
 data SwitchMerge (k :: * -> *)  = SwitchMerge
   { smMerge :: Merge k
+  , smParent :: Node (DMap (WrapArg Event k))
   , smSub   :: Subscription (DMap (WrapArg Event k))
   }
 
@@ -245,7 +246,6 @@ makeNode :: MakeNode a -> IO (NodeRef a)
 makeNode create = NodeRef <$> newRef (Left create)
 
 
-{-# INLINE makeEvent #-}
 makeEvent :: MonadIORef m =>  m (Node a) -> m (Event a)
 makeEvent create = fmap (Event . NodeRef) $ newRef . Right =<< create
 
@@ -308,16 +308,15 @@ makeWeak !a finalizer = liftIO $ mkWeakPtr a finalizer
 
 {-# INLINE subscribe #-}
 subscribe :: MonadIORef m => Node a -> Subscription a -> m (Weak (Subscription a))
-subscribe node sub = liftIO $ do
+subscribe node !sub = liftIO $ do
   weakSub <- makeWeak sub Nothing
   modifyRef (nodeSubs node) (weakSub :)
   return weakSub
 
 {-# INLINE subscribe_ #-}
 subscribe_ :: MonadIORef m => Node a -> Subscription a -> m ()
-subscribe_ node sub = liftIO $ do
-  weakSub <- makeWeak sub Nothing
-  modifyRef (nodeSubs node) (weakSub :)
+subscribe_ node = void . subscribe node
+
 
 {-# INLINE createNode #-}
 createNode :: MakeNode a -> EventM (Node a)
@@ -551,7 +550,7 @@ switchMerge es e = case e of
 
     rec
       let sub = SwitchMergeSub m
-          sm = SwitchMerge m sub
+          sm = SwitchMerge m parent sub
 
       m <- makeMerge' (NodeSwitchMerge sm) refs
 

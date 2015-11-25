@@ -213,6 +213,17 @@ testCases =
 
   , testE "switchMerge-1" $ switchMergeMap mempty =<< increasing
 
+  , testE "switchMerge-2" $ do
+      e <- eventsFrom 0
+      switchMergeMap (Map.singleton 0 e) =<< increasing
+
+  , testE "switchMerge-3" $ do
+      es <- eventsMany
+      switchMergeMap es =<< increasing
+
+  , testE "switchMerge-4" $ do
+      es <- eventsMany
+      switchMergeMap es =<< decreasing
 
   ] where
 
@@ -229,6 +240,15 @@ testCases =
     increasing = do
       es <- mapM eventsFrom [1..8]
       planList $ zipWith Map.singleton [1..8] es
+
+    decreasing :: TestPlan t m => m (Event t (Map Int (Event t Int)))
+    decreasing = planList $ zipWith Map.singleton [1..8] (repeat never)
+
+    eventsMany :: TestPlan t m => m (Map Int (Event t Int))
+    eventsMany = do
+      es <- mapM eventsFrom [8,7..1]
+      return $ Map.fromList $ zip [1..8] es
+
 
     values = "abcde"
     toMap str = Map.fromList $ map (\c -> (c, c)) str
