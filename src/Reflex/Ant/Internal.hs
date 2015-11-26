@@ -592,7 +592,7 @@ makeMerge' :: GCompare k => Parent (DMap k) -> [DSum (WrapArg NodeRef k)] -> Eve
 makeMerge' parent refs = do
   rec
     (subs, heights, vals)   <- unzip3 <$> traverse (subscribeMerge m) refs
-    node <- newNode (succ $ foldl1 max heights) parent
+    node <- newNode (succ $ foldl' max 0 heights) parent
     m <- Merge node <$> newRef (DMap.fromDistinctAscList subs) <*> newRef DMap.empty
 
   let values = catMaybes vals
