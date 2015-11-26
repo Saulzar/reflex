@@ -26,7 +26,6 @@ import qualified Reflex.Host.Class as R
 
 import Control.Monad.Ref
 import Control.Monad.Reader
-import Control.Monad.State.Strict
 import Control.Monad.Primitive
 
 import Data.Semigroup
@@ -245,7 +244,6 @@ unsafeLazy create = unsafePerformIO $ newIORef (Left create)
 makeNode :: MakeNode a -> IO (NodeRef a)
 makeNode create = NodeRef <$> newRef (Left create)
 
-
 makeEvent :: MonadIORef m =>  m (Node a) -> m (Event a)
 makeEvent create = fmap (Event . NodeRef) $ newRef . Right =<< create
 
@@ -253,11 +251,9 @@ makeEvent create = fmap (Event . NodeRef) $ newRef . Right =<< create
 unsafeCreateEvent :: MakeNode a -> Event a
 unsafeCreateEvent = Event . NodeRef . unsafeLazy
 
-
 createEvent  :: MakeNode a -> IO (Event a)
 createEvent create = Event <$> makeNode create
 
-{-# INLINE readLazy #-}
 readLazy :: MonadIORef m => (a -> m b) -> LazyRef a b -> m b
 readLazy create ref = readRef ref >>= \case
     Left a -> do
@@ -840,17 +836,19 @@ askRef = asks >=> readRef
 askModifyRef :: (MonadReader r m, MonadRef m) => (r -> Ref m a) -> (a -> a) -> m ()
 askModifyRef g f = asks g >>= flip modifyRef f
 
-type InvalidateM a = StateT [Connect] IO a
 
 -- Write holds out and invalidate, return switches to connect!
 writeHolds :: [WriteHold] -> IO [Connect]
-writeHolds writes = execStateT (traverse_ writeHold writes) []
+writeHolds writes = do
+  connects <- newRef []
+  traverse_ (writeHold connects) writes
+  readRef connects
 
 {-# INLINE writeHold #-}
-writeHold :: WriteHold -> InvalidateM ()
-writeHold (WriteHold h value) = do
+writeHold :: IORef [Connect] -> WriteHold -> IO ()
+writeHold connects (WriteHold h value) = do
   writeRef (holdValue h) value
-  takeRef (holdInvs h) >>= invalidate
+  takeRef (holdInvs h) >>= invalidate connects
 
 {-# INLINE traverseWeak #-}
 traverseWeak :: MonadIO m => (a -> m ()) -> Weak a -> m ()
@@ -860,14 +858,14 @@ traverseWeak f weak = liftIO (deRefWeak weak) >>= traverse_ f
 forWeak :: MonadIO m => Weak a -> (a -> m ()) -> m ()
 forWeak = flip traverseWeak
 
-invalidate :: [Invalidator] -> InvalidateM ()
-invalidate = traverse_  invalidate' where
+invalidate :: IORef [Connect] -> [Invalidator] -> IO ()
+invalidate connects = traverse_  invalidate' where
   invalidate' (PullInv wp) = forWeak wp $ \p -> do
     writeRef (pullValue p) Nothing
-    takeRef (pullInvs p) >>= invalidate
+    takeRef (pullInvs p) >>= invalidate connects
 
   invalidate' (SwitchInv ws) =
-    forWeak ws $ \s -> modify (Connect s:)
+    forWeak ws $ \s -> modifyRef connects (Connect s:)
 
 
 
