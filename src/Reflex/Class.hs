@@ -64,6 +64,8 @@ class MonadSample t m => MonadHold t m where
 
   switchMerge :: GCompare k => DMap (WrapArg (Event t) k) -> Event t (DMap (WrapArg (Event t) k)) -> m (Event t (DMap k))
 
+
+
 newtype EventSelector t k = EventSelector { select :: forall a. k a -> Event t a }
 
 --------------------------------------------------------------------------------
@@ -386,3 +388,15 @@ gate = attachWithMaybe $ \allow a -> if allow then Just a else Nothing
 switcher :: (Reflex t, MonadHold t m)
         => Behavior t a -> Event t (Behavior t a) -> m (Behavior t a)
 switcher b eb = pull . (sample <=< sample) <$> hold b eb
+
+foldE :: (Reflex t, MonadHold t m, MonadFix m) => (a -> b -> b) -> b -> Event t a -> m (Event t b, Behavior t b)
+foldE f z e = do
+  rec let e' = attachWith (flip f) b e
+      b <- hold z e'
+  return (e', b)
+
+switchMerge' ::  (GCompare k, Reflex t, MonadHold t m, MonadFix m) => DMap (WrapArg (Event t) k) -> Event t (DMap (WrapArg (Event t) k)) -> m (Event t (DMap k))
+switchMerge' initial updates = do
+  es <- snd <$> foldE DMap.union initial updates
+  return (switch $ merge <$> es)
+

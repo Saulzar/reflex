@@ -8,10 +8,8 @@ and laziness/strictness may differ.
 module Reflex.Pure where
 
 import Reflex.Class
-import Reflex.Dynamic
 import Data.Functor.Misc
 
-import Control.Monad
 import Data.MemoTrie
 import Data.Dependent.Map (DMap, GCompare)
 import qualified Data.Dependent.Map as DMap
@@ -76,8 +74,6 @@ instance (Enum t, HasTrie t, Ord t) => MonadHold (Pure t) ((->) t) where
                    Nothing -> f lastTime
                    Just x  -> x
 
-  switchMerge initial updates = do
-    es <- current <$> foldDyn DMap.union initial updates
-    return (switch $ merge <$> es)
+  switchMerge = switchMerge'
 
 

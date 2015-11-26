@@ -54,8 +54,9 @@ data MakeNode a where
   MakeMerge       :: GCompare k => [DSum (WrapArg NodeRef k)] -> MakeNode (DMap k)
   MakeFan         :: GCompare k => k a -> FanRef k -> MakeNode a
 
+data Lazy a b = Create a | Cached b
 
-type LazyRef a b = IORef (Either a b)
+type LazyRef a b = IORef (Lazy a b)
 newtype NodeRef a = NodeRef (LazyRef (MakeNode a) (Node a))
 
 type FanRef  k = LazyRef (NodeRef (DMap k)) (Fan k)
@@ -238,14 +239,14 @@ instance MonadRef BehaviorM where
 
 {-# NOINLINE unsafeLazy #-}
 unsafeLazy :: a -> LazyRef a b
-unsafeLazy create = unsafePerformIO $ newIORef (Left create)
+unsafeLazy create = unsafePerformIO $ newIORef (Create create)
 
 {-# INLINE makeNode #-}
 makeNode :: MakeNode a -> IO (NodeRef a)
-makeNode create = NodeRef <$> newRef (Left create)
+makeNode create = NodeRef <$> newRef (Create create)
 
 makeEvent :: MonadIORef m =>  m (Node a) -> m (Event a)
-makeEvent create = fmap (Event . NodeRef) $ newRef . Right =<< create
+makeEvent create = fmap (Event . NodeRef) $ newRef . Cached =<< create
 
 {-# INLINE unsafeCreateEvent #-}
 unsafeCreateEvent :: MakeNode a -> Event a
@@ -256,11 +257,11 @@ createEvent create = Event <$> makeNode create
 
 readLazy :: MonadIORef m => (a -> m b) -> LazyRef a b -> m b
 readLazy create ref = readRef ref >>= \case
-    Left a -> do
+    Create a -> do
       node <- create a
-      writeRef ref (Right node)
+      writeRef ref (Cached node)
       return node
-    Right node -> return node
+    Cached node -> return node
 
 
 
@@ -330,7 +331,7 @@ constant = Constant
 
 hold :: a -> Event a -> EventM (Behavior a)
 hold a e = do
-  h <- Hold <$> newRef [] <*> newRef a <*> newRef (Left e)
+  h <- Hold <$> newRef [] <*> newRef a <*> newRef (Create e)
   delayInitHold h
   return $ HoldB h
 
@@ -708,7 +709,7 @@ makeFanNode fanRef k = do
 newEventWithFire :: IO (Event a, a -> DSum Trigger)
 newEventWithFire = do
   node  <- newNode 0 NodeRoot
-  nodeRef  <- NodeRef <$> newIORef (Right node)
+  nodeRef  <- NodeRef <$> newIORef (Cached node)
   return (Event nodeRef, (Trigger node :=>))
 
 

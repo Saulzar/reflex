@@ -13,8 +13,6 @@ import qualified Data.IntMap as IntMap
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
 
-import Data.Traversable
-import Data.Foldable
 import Data.Monoid
 import Data.Bifunctor
 import Data.Maybe
@@ -48,8 +46,8 @@ runPure :: PurePlan a -> (a, IntSet)
 runPure (PurePlan p) = runStateT p mempty $ 0
 
 relavantTimes :: IntSet -> IntSet
-relavantTimes occs = IntSet.fromList [0..last + 1]
-  where last = fromMaybe 0 (fst <$> IntSet.maxView occs)
+relavantTimes occs = IntSet.fromList [0..end + 1]
+  where end = fromMaybe 0 (fst <$> IntSet.maxView occs)
 
 testBehavior :: (Behavior (Pure Int) a, IntSet) -> IntMap a
 testBehavior (b, occs) = IntMap.fromSet (sample b) (relavantTimes occs)
