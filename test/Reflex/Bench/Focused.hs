@@ -90,6 +90,11 @@ mapDynChain 0 d = return d
 mapDynChain n d = mapDynChain (n - 1) =<< mapDyn (+1) d
 
 
+
+joinDynChain :: (Reflex t, MonadHold t m) => Word -> Dynamic t Word -> m (Dynamic t Word)
+joinDynChain 0 d = return d
+joinDynChain n d = joinDynChain (n - 1) =<< joinDyn <$> mapDyn (const d) d
+
 combineDynChain :: (Reflex t, MonadHold t m) => Word -> Dynamic t Word -> m (Dynamic t Word)
 combineDynChain 0 d = return d
 combineDynChain n d = combineDynChain (n - 1) =<< combineDyn (+) d d
@@ -256,6 +261,7 @@ merging n =
 dynamics :: Word -> [(String, TestCase)]
 dynamics n =
   [ testE "mapDynChain"         $ fmap updated $ mapDynChain n =<< d
+  , testE "joinDynChain"        $ fmap updated $ joinDynChain n =<< d
   , testE "combineDynChain"     $ fmap updated $ combineDynChain n =<< d
   , testE "dense mergeTree"     $ fmap updated $ mergeTreeDyn 8 =<< dense
   , testE "sparse mergeTree"    $ fmap updated $ mergeTreeDyn 8 =<< sparse
