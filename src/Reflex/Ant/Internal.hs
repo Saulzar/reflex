@@ -257,7 +257,7 @@ unsafeCreateEvent = Event . NodeRef . unsafeLazy
 createEvent  :: MakeNode a -> IO (Event a)
 createEvent create = Event <$> makeNode create
 
-
+{-# INLINE readLazy #-}
 readLazy :: MonadIORef m => (a -> m b) -> LazyRef a b -> m b
 readLazy create ref = readRef ref >>= \case
     Left a -> do
@@ -581,7 +581,7 @@ subscribeMerge  m (WrapArg !k :=> nodeRef) = do
   return (WrapArg k :=> MergeParent parent sub weak, height, (k :=>) <$> value)
     where sub = MergeSub m k
 
-
+{-# INLINE makeMerge #-}
 makeMerge :: GCompare k => [DSum (WrapArg NodeRef k)] -> EventM (Node (DMap k))
 makeMerge refs = do
   rec m <- makeMerge' (NodeMerge m) refs
@@ -592,7 +592,7 @@ makeMerge' :: GCompare k => Parent (DMap k) -> [DSum (WrapArg NodeRef k)] -> Eve
 makeMerge' parent refs = do
   rec
     (subs, heights, vals)   <- unzip3 <$> traverse (subscribeMerge m) refs
-    node <- newNode (succ $ foldl' max 0 heights) parent
+    node <- newNode (succ $ foldl1 max heights) parent
     m <- Merge node <$> newRef (DMap.fromDistinctAscList subs) <*> newRef DMap.empty
 
   let values = catMaybes vals

@@ -69,11 +69,6 @@ benchFiring runHost (name, TestB plan) = env setup (\e -> bench name $ whnfIO $ 
       return (b, makeDense s)
 
 
--- main = runAntHost $ do
---    (Ignore h, s) <- setupFiring $ Focused.switches 100 (Focused.switchFactors 100)
---    readSchedule s (readEvent' h)
-
-
 
 benchAll ::  (String, TestCase) -> Benchmark
 benchAll (name, test) = bgroup name
@@ -83,7 +78,7 @@ benchAll (name, test) = bgroup name
 
 
 main :: IO ()
-main = defaultMain  [sub 100 40, firing 1000,  firing 10000, merging 50, merging 100]
+main = defaultMain  [sub 100 40, firing 1000,  firing 10000, merging 50, merging 100, merging 200]
   where
     sub n frames = bgroup ("subscribing " ++ show (n, frames)) $ benchAll <$> Focused.subscribing n frames
     firing n =  bgroup ("firing " ++ show n) $ benchAll <$>  Focused.firing n

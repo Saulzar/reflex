@@ -11,6 +11,7 @@ import Control.Applicative
 import Data.Foldable
 import Data.Traversable
 
+import Data.Maybe
 import Data.Map (Map)
 import qualified Data.Map as Map
 
@@ -118,6 +119,11 @@ data UpdatedMap t k a = UpdatedMap (Map k a) (Event t (Map k (Maybe a)))
 switchMergeEvents ::  (MonadFix m, MonadHold t m, Reflex t, Ord k) =>  UpdatedMap t k (Event t a)  -> m (Event t (Map k a))
 switchMergeEvents mapChanges = switch . fmap mergeMap  <$> holdMap mapChanges
 
+
+switchMerge' :: (MonadFix m, MonadHold t m, Reflex t, Ord k) =>  UpdatedMap t k (Event t a)  -> m (Event t (Map k a))
+switchMerge' (UpdatedMap initial changes) = switchMergeMap initial (fmap (fromMaybe never) <$> changes)
+
+
 switchMergeBehaviors  :: forall a t m k. (MonadFix m, MonadHold t m, Reflex t, Ord k) =>  UpdatedMap t k (Behavior t a)  -> m (Behavior t (Map k a))
 switchMergeBehaviors mapChanges = pull <$> joinMap <$> holdMap mapChanges
   where joinMap m = traverse sample =<< sample m
@@ -135,7 +141,6 @@ holdMapDyn (UpdatedMap initial changes) = foldDyn (flip (Map.foldWithKey modify)
 -- | Hold an UpdatedMap as a behavior by applying differences to the initial value
 holdMap :: (Reflex t, MonadHold t m, MonadFix m, Ord k) => UpdatedMap t k a -> m (Behavior t (Map k a))
 holdMap = (current <$>) . holdMapDyn
-
 
 
 increasingMerge :: TestPlan t m => [a] -> m (UpdatedMap t Int a)
@@ -197,12 +202,20 @@ subscribing n frames =
 -- a pattern which occurs frequently in reflex-dom collections
 merging :: Word -> [(String, TestCase)]
 merging n =
-  [ testE "increasing events"    $ switchMergeEvents =<< increasingMerge =<< sparse
+  [ testE "static events"        $ mergeList <$> sparse
+  , testE "increasing events"    $ switchMergeEvents =<< increasingMerge =<< sparse
   , testE "decreasing events"    $ switchMergeEvents =<< decreasingMerge =<< sparse
   , testE "modify events"        $ switchMergeEvents =<< modifyMerge =<< sparse
+
+  , testB "static behaviors"     $ pull . traverse sample <$> counters
   , testB "increasing behaviors" $ switchMergeBehaviors =<< increasingMerge =<< counters
   , testB "decreasing behaviors" $ switchMergeBehaviors =<< decreasingMerge =<< counters
   , testB "modify behaviors"     $ switchMergeBehaviors =<< modifyMerge =<< counters
+
+
+  , testE "increasing events/switchMerge"    $ switchMerge' =<< increasingMerge =<< sparse
+  , testE "decreasing events/switchMerge"    $ switchMerge' =<< decreasingMerge =<< sparse
+  , testE "modify events/switchMerge"        $ switchMerge' =<< modifyMerge =<< sparse
   ]
 
   where
