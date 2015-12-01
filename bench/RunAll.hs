@@ -8,8 +8,8 @@ import Criterion.Main
 import Reflex
 import Reflex.Host.Class
 
--- import Reflex.Ant
--- import qualified Reflex.Ant.Internal as Ant
+import Reflex.Ant
+import qualified Reflex.Ant.Internal as Ant
 import Reflex.TestPlan
 import Reflex.Plan.Reflex
 
@@ -36,8 +36,8 @@ newtype Ignore a = Ignore a
 instance NFData (Ignore a) where
   rnf !_ = ()
 
--- instance NFData (Ant.EventHandle a) where
---   rnf !_ = ()
+instance NFData (Ant.EventHandle a) where
+   rnf !_ = ()
 
 instance NFData (SpiderEventHandle a) where
   rnf !_ = ()
@@ -63,7 +63,7 @@ benchFiring runHost (name, TestB p) = env setup (\e -> bench name $ whnfIO $ run
 main :: IO ()
 main = defaultMain
   [ benchImpl "spider" runSpiderHost
---, benchImpl "ant" runAntHost
+  , benchImpl "ant" runAntHost
   ]
 
 benchImpl :: (MonadReflexHost' t m, MonadSample t m) => String -> (forall a. m a -> IO a) -> Benchmark
