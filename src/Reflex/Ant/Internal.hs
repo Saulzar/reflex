@@ -717,7 +717,7 @@ newEventWithFire :: IO (Event a, a -> DSum Trigger Identity)
 newEventWithFire = do
   node  <- newNode 0 NodeRoot
   nodeRef  <- NodeRef <$> newIORef (Cached node)
-  return (Event nodeRef, (Trigger node :=>) . coerce)
+  return (Event nodeRef, (Trigger node :=>) . Identity)
 
 
 {-# INLINE newFanEventWithTrigger #-}
@@ -1069,6 +1069,6 @@ catDSums = catMaybes . map toMaybe
 
 {-# INLINE toMaybe #-}
 toMaybe :: DSum k Maybe  -> Maybe (DSum k Identity)
-toMaybe (k :=> Just v) = Just (k :=> coerce v)
+toMaybe (k :=> Just v) = Just (k :=> Identity v)
 toMaybe _ = Nothing
 
