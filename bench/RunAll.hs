@@ -8,11 +8,11 @@ import Criterion.Main
 import Reflex
 import Reflex.Host.Class
 
-import Reflex.Ant
+-- import Reflex.Ant
+-- import qualified Reflex.Ant.Internal as Ant
 import Reflex.TestPlan
 import Reflex.Plan.Reflex
 
-import qualified Reflex.Ant.Internal as Ant
 import Reflex.Spider.Internal (SpiderEventHandle)
 import qualified Reflex.Bench.Focused as Focused
 
@@ -36,8 +36,8 @@ newtype Ignore a = Ignore a
 instance NFData (Ignore a) where
   rnf !_ = ()
 
-instance NFData (Ant.EventHandle a) where
-  rnf !_ = ()
+-- instance NFData (Ant.EventHandle a) where
+--   rnf !_ = ()
 
 instance NFData (SpiderEventHandle a) where
   rnf !_ = ()
@@ -60,23 +60,21 @@ benchFiring runHost (name, TestB p) = env setup (\e -> bench name $ whnfIO $ run
       (b, s) <- runPlan p
       return (b, makeDense s)
 
-
-
-benchAll ::  (String, TestCase) -> Benchmark
-benchAll (name, test) = bgroup name
-  [ benchFiring runSpiderHost ("spider", test)
-  , benchFiring runAntHost ("ant", test)
+main :: IO ()
+main = defaultMain
+  [ benchImpl "spider" runSpiderHost
+--, benchImpl "ant" runAntHost
   ]
 
-
-main :: IO ()
-main = defaultMain  [sub 100 40, dynamics 100, dynamics 1000, firing 1000,  firing 10000, merging 10, merging 50, merging 100, merging 200]
+benchImpl :: (MonadReflexHost' t m, MonadSample t m) => String -> (forall a. m a -> IO a) -> Benchmark
+benchImpl name runHost = bgroup name  [sub 100 40, dynamics 100, dynamics 1000, firing 1000,  firing 10000, merging 10, merging 50, merging 100, merging 200]
   where
-    sub n frames = bgroup ("subscribing " ++ show (n, frames)) $ benchAll <$> Focused.subscribing n frames
-    firing n =  bgroup ("firing " ++ show n) $ benchAll <$>  Focused.firing n
-    merging n = bgroup ("merging " ++ show n) $ benchAll <$> Focused.merging n
-    dynamics n = bgroup ("dynamics " ++ show n) $ benchAll <$> Focused.dynamics n
+    sub n frames = runGroup ("subscribing " ++ show (n, frames)) $ Focused.subscribing n frames
+    firing n     = runGroup ("firing "    ++ show n) $ Focused.firing n
+    merging n    = runGroup ("merging "   ++ show n) $ Focused.merging n
+    dynamics n   = runGroup ("dynamics "  ++ show n) $ Focused.dynamics n
 
+    runGroup name benchmarks = bgroup name (benchFiring runHost <$> benchmarks)
 
 
 

@@ -46,9 +46,9 @@ class (MonadHold t (PushM t), MonadSample t (PullM t), MonadFix (PushM t), Funct
   -- | A monad for doing complex pull-based calculations efficiently
   type PullM t :: * -> *
   -- | Merge a collection of events; the resulting Event will only occur if at least one input event is occuring, and will contain all of the input keys that are occurring simultaneously
-  merge :: GCompare k => DMap (WrapArg (Event t) k) -> Event t (DMap k) --TODO: Generalize to get rid of DMap use --TODO: Provide a type-level guarantee that the result is not empty
+  merge :: GCompare k => DMap k (Event t) -> Event t (DMap k Identity) --TODO: Generalize to get rid of DMap use --TODO: Provide a type-level guarantee that the result is not empty
   -- | Efficiently fan-out an event to many destinations.  This function should be partially applied, and then the result applied repeatedly to create child events
-  fan :: GCompare k => Event t (DMap k) -> EventSelector t k --TODO: Can we help enforce the partial application discipline here?  The combinator is worthless without it
+  fan :: GCompare k => Event t (DMap k Identity) -> EventSelector t k --TODO: Can we help enforce the partial application discipline here?  The combinator is worthless without it
   -- | Create an Event that will occur whenever the currently-selected input Event occurs
   switch :: Behavior t (Event t a) -> Event t a
   -- | Create an Event that will occur whenever the input event is occurring and its occurrence value, another Event, is also occurring
@@ -62,7 +62,7 @@ class MonadSample t m => MonadHold t m where
   -- | Create a new Behavior whose value will initially be equal to the given value and will be updated whenever the given Event occurs
   hold :: a -> Event t a -> m (Behavior t a)
 
-  switchMerge :: GCompare k => DMap (WrapArg (Event t) k) -> Event t (DMap (WrapArg (Event t) k)) -> m (Event t (DMap k))
+  switchMerge :: GCompare k => DMap k (Event t) -> Event t (DMap k (Event t)) -> m (Event t (DMap k Identity))
 
 
 
@@ -284,30 +284,30 @@ instance GShow (EitherTag l r) where
     LeftTag -> showString "LeftTag"
     RightTag -> showString "RightTag"
 
-instance (Show l, Show r) => ShowTag (EitherTag l r) where
-  showTaggedPrec t n a = case t of
+instance (Show l, Show r) => ShowTag (EitherTag l r) Identity where
+  showTaggedPrec t n (Identity a) = case t of
     LeftTag -> showsPrec n a
     RightTag -> showsPrec n a
 
 -- | Convert 'Either' to a 'DSum'. Inverse of 'dsumToEither'.
-eitherToDSum :: Either a b -> DSum (EitherTag a b)
+eitherToDSum :: Either a b -> DSum (EitherTag a b) Identity
 eitherToDSum = \case
-  Left a -> LeftTag :=> a
-  Right b -> RightTag :=> b
+  Left a -> (LeftTag :=> Identity a)
+  Right b -> (RightTag :=> Identity b)
 
 -- | Convert 'DSum' to 'Either'. Inverse of 'eitherToDSum'.
-dsumToEither :: DSum (EitherTag a b) -> Either a b
+dsumToEither :: DSum (EitherTag a b) Identity -> Either a b
 dsumToEither = \case
-  LeftTag :=> a -> Left a
-  RightTag :=> b -> Right b
+  (LeftTag :=> Identity a) -> Left a
+  (RightTag :=> Identity b) -> Right b
 
 -- | Extract the values of a 'DMap' of 'EitherTag's.
-dmapToThese :: DMap (EitherTag a b) -> Maybe (These a b)
+dmapToThese :: DMap (EitherTag a b) Identity -> Maybe (These a b)
 dmapToThese m = case (DMap.lookup LeftTag m, DMap.lookup RightTag m) of
   (Nothing, Nothing) -> Nothing
-  (Just a, Nothing) -> Just $ This a
-  (Nothing, Just b) -> Just $ That b
-  (Just a, Just b) -> Just $ These a b
+  (Just (Identity a), Nothing) -> Just $ This a
+  (Nothing, Just (Identity b)) -> Just $ That b
+  (Just (Identity a), Just (Identity b)) -> Just $ These a b
 
 -- | Create a new 'Event' that occurs if at least one of the supplied
 -- 'Event's occurs. If both occur at the same time they are combined
@@ -331,7 +331,11 @@ instance (Semigroup a, Reflex t) => Monoid (Event t a) where
 -- in the list occurs. If multiple occur at the same time they are
 -- folded from the left with the given function.
 mergeWith :: Reflex t => (a -> a -> a) -> [Event t a] -> Event t a
-mergeWith f es =  foldl1 f <$> mergeList es
+mergeWith f es = fmap (Prelude.foldl1 f . map (\(Const2 _ :=> Identity v) -> v) . DMap.toList)
+               . merge
+               . DMap.fromList
+               . map (\(k, v) -> (Const2 k) :=> v)
+               $ zip [0 :: Int ..] es
 
 -- | Create a new 'Event' that occurs if at least one of the 'Event's
 -- in the list occurs. If multiple occur at the same time the value is
@@ -343,13 +347,8 @@ leftmost = mergeWith const
 -- in the list occurs and has a list of the values of all 'Event's
 -- occuring at that time.
 mergeList :: Reflex t => [Event t a] -> Event t (NonEmpty a)
-mergeList es = fromDMap <$> merge (eventDMap es) where
-
-  eventDMap :: [Event t a] -> DMap (WrapArg (Event t) (Const2 Int a))
-  eventDMap es = DMap.fromDistinctAscList (map (\(k, v) -> WrapArg (Const2 k) :=> v) (zip [0 :: Int ..] es))
-
-  fromDMap :: DMap (Const2 Int a) -> NonEmpty a
-  fromDMap = NE.fromList . map (\(Const2 _ :=> v) -> v) . DMap.toList
+mergeList [] = never
+mergeList es = mergeWith (<>) $ map (fmap (:|[])) es
 
 -- | Create a new 'Event' combining the map of 'Event's into an
 -- 'Event' that occurs if at least one of them occurs and has a map of
@@ -376,7 +375,7 @@ switchPromptly ea0 eea = do
 
 instance Reflex t => Align (Event t) where
   nil = never
-  align ea eb = fmapMaybe dmapToThese $ merge $ DMap.fromList [WrapArg LeftTag :=> ea, WrapArg RightTag :=> eb]
+  align ea eb = fmapMaybe dmapToThese $ merge $ DMap.fromList [LeftTag :=> ea, RightTag :=> eb]
 
 -- | Create a new 'Event' that only occurs if the supplied 'Event'
 -- occurs and the 'Behavior' is true at the time of occurence.
@@ -395,7 +394,7 @@ foldE f z e = do
       b <- hold z e'
   return (e', b)
 
-switchMerge' ::  (GCompare k, Reflex t, MonadHold t m, MonadFix m) => DMap (WrapArg (Event t) k) -> Event t (DMap (WrapArg (Event t) k)) -> m (Event t (DMap k))
+switchMerge' ::  (GCompare k, Reflex t, MonadHold t m, MonadFix m) => DMap k (Event t) -> Event t (DMap k (Event t)) -> m (Event t (DMap k Identity))
 switchMerge' initial updates = do
   es <- snd <$> foldE DMap.union initial updates
   return (switch $ merge <$> es)
