@@ -161,8 +161,11 @@ data Coincidence a = Coincidence
   }
 
 
-data MergeParent a where
-  MergeParent      :: Node a -> Subscription a -> Weak (Subscription a) -> MergeParent a
+data MergeParent a = MergeParent
+  { mpNode :: Node a
+  , mpSub  :: Subscription a
+  , mpWeak :: Weak (Subscription a)
+  }
 
 data Merge k = Merge
   { mergeNode     :: (Node (DMap k Identity))
@@ -567,17 +570,19 @@ merge events = case catEvents (DMap.toAscList events) of
   [] -> Never
   refs -> unsafeCreateEvent (MakeMerge refs)
 
-type MergeInfo k = (DSum k MergeParent, Height, Maybe (DSum k Identity))
+type BuildMerge k = ([DSum k MergeParent], Height, [DSum k Identity])
 
 {-# INLINE subscribeMerge #-}
-subscribeMerge :: GCompare k =>  Merge k -> DSum k NodeRef -> EventM (MergeInfo k)
-subscribeMerge  m (!k :=> nodeRef) = do
-  parent <- readNodeRef nodeRef
-  height <- readHeight parent
-  value <- readNode parent
-  weak <- subscribe parent sub
+subscribeMerge :: GCompare k =>  Merge k -> BuildMerge k -> DSum k NodeRef -> EventM (BuildMerge k)
+subscribeMerge  m (parents, h, values) (k :=> nodeRef) = do
+  parent  <- readNodeRef nodeRef
+  height  <- readHeight parent
+  weak    <- subscribe parent sub
+  value   <- readNode parent
+  return ( (k :=> MergeParent parent sub weak) : parents
+         , max h height
+         , maybe values (\v -> (k :=> Identity v) : values) value)
 
-  return (k :=> MergeParent parent sub weak, height, (k :=>) . Identity <$> value)
     where sub = MergeSub m k
 
 {-# INLINE makeMerge #-}
@@ -590,38 +595,38 @@ makeMerge refs = do
 makeMerge' :: GCompare k => Parent (DMap k Identity) -> [DSum k NodeRef] -> EventM (Merge k)
 makeMerge' parent refs = do
   rec
-    (subs, heights, vals)   <- unzip3 <$> traverse (subscribeMerge m) refs
-    node <- newNode (succ $ foldl' max 0 heights) parent
+    (subs, height, values)   <- foldM (subscribeMerge m) (mempty, 0, mempty) refs
+    node <- newNode (succ height) parent
     m <- Merge node <$> newRef (DMap.fromDistinctAscList subs) <*> newRef DMap.empty
 
-  let values = catMaybes vals
   when (not  (null values)) $ writeNode node (DMap.fromDistinctAscList values)
   return m
 
 
 modifyMerge :: forall k. GCompare k => Merge k -> DMap k Event -> EventM ()
 modifyMerge m update = do
-
   subs <- readRef (subscribeMerges m)
-  (subs', heights, _) <- unzip3 . catMaybes <$> traverse (addMerge subs)  (DMap.toList update)
-
   height <- readHeight (mergeNode m)
-  let height' = succ $ foldl' max (pred height) heights
+  (subs', height')   <- foldM (addMerge m) (subs, height) (DMap.toList update)
   liftIO $ propagateHeight height' (mergeNode m)
+  writeRef (subscribeMerges m) subs'
 
-  modifyRef (subscribeMerges m) (DMap.union (DMap.fromDistinctAscList subs'))
+
+addMerge :: GCompare k => Merge k -> (DMap k MergeParent, Height) -> DSum k Event -> EventM (DMap k MergeParent, Height)
+addMerge m (subs, height) (k :=> e) = case e of
+  Never -> (,height) <$> remove
+  Event nodeRef -> do
+    parent  <- readNodeRef nodeRef
+    height' <- readHeight parent
+    weak    <- subscribe parent sub
+    subs' <- insert (MergeParent parent sub weak)
+    return (subs', max height (succ height'))
 
   where
-
-    addMerge :: DMap k MergeParent -> DSum k Event -> EventM (Maybe (MergeInfo k))
-    addMerge subs (k :=> e) = do
-
-      for_ (DMap.lookup k subs) $ \(MergeParent _ _ weak) -> liftIO $ finalize weak
-      case e of
-        Never      -> return Nothing
-        Event ref  -> Just <$> subscribeMerge m (k :=> ref)
-
-
+    insert p = done $ DMap.insertLookupWithKey' (\_ v _-> v) k p subs
+    remove   = done $ DMap.updateLookupWithKey (\_ _ -> Nothing) k subs
+    done (old, subs') = subs' <$ traverse_ (liftIO . finalize . mpWeak) old
+    sub = MergeSub m k
 
 
 {-# INLINE never #-}
@@ -712,7 +717,7 @@ newEventWithFire :: IO (Event a, a -> DSum Trigger Identity)
 newEventWithFire = do
   node  <- newNode 0 NodeRoot
   nodeRef  <- NodeRef <$> newIORef (Cached node)
-  return (Event nodeRef, (Trigger node :=>) . Identity)
+  return (Event nodeRef, (Trigger node :=>) . coerce)
 
 
 {-# INLINE newFanEventWithTrigger #-}
@@ -799,7 +804,7 @@ propagate  height node value = traverseSubs propagate' node where
   propagate' (PushSub !p)  = pushCompute p value >>= traverse_ (writePropagate height (pushNode p))
   propagate' (MergeSub m k) = do
     partial <- readRef (mergePartial m)
-    writeRef (mergePartial m) $ DMap.insert k (Identity value) partial
+    writeRef (mergePartial m) $ DMap.insert k (coerce value) partial
     when (DMap.null partial) $ delayMerge m =<< readHeight (mergeNode m)
 
   propagate' (SwitchMergeSub m) = delayConnect (ConnectMerge m value)
@@ -810,8 +815,8 @@ propagate  height node value = traverseSubs propagate' node where
   propagate' (CoinOuter c) = connectC c value >>= traverse_ (propagate height (coinNode c))
   propagate' (FanSub    f) = do
     nodes <- readRef (fanNodes f)
-    for_ (DMap.toList value) $ \(k :=> Identity v) ->
-      traverseNode nodes k $ \n -> writePropagate height n v
+    for_ (DMap.toList value) $ \(k :=> v) ->
+      traverseNode nodes k $ \n -> writePropagate height n (coerce v)
 
 {-# INLINE propagateMerge #-}
 propagateMerge :: Height -> DelayMerge -> EventM ()
@@ -1064,6 +1069,6 @@ catDSums = catMaybes . map toMaybe
 
 {-# INLINE toMaybe #-}
 toMaybe :: DSum k Maybe  -> Maybe (DSum k Identity)
-toMaybe (k :=> Just v) = Just (k :=> Identity v)
+toMaybe (k :=> Just v) = Just (k :=> coerce v)
 toMaybe _ = Nothing
 
