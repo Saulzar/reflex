@@ -159,8 +159,11 @@ data Coincidence a = Coincidence
   }
 
 
-data MergeParent a where
-  MergeParent      :: Node a -> Subscription a -> Weak (Subscription a) -> MergeParent a
+data MergeParent a = MergeParent
+  { mpNode :: Node a
+  , mpSub  :: Subscription a
+  , mpWeak :: Weak (Subscription a)
+  }
 
 data Merge k = Merge
   { mergeNode     :: (Node (DMap k))
@@ -568,20 +571,24 @@ merge events = case catEvents (DMap.toAscList events) of
   [] -> Never
   refs -> unsafeCreateEvent (MakeMerge refs)
 
-type MergeInfo k = (DSum (WrapArg MergeParent k), Height, Maybe (DSum k))
+
+
+type BuildMerge k = ([DSum (WrapArg MergeParent k)], Height, [DSum k])
 
 {-# INLINE subscribeMerge #-}
-subscribeMerge :: GCompare k =>  Merge k -> DSum (WrapArg NodeRef k) -> EventM (MergeInfo k)
-subscribeMerge  m (WrapArg !k :=> nodeRef) = do
-  parent <- readNodeRef nodeRef
-  height <- readHeight parent
-  value <- readNode parent
-  weak <- subscribe parent sub
+subscribeMerge :: GCompare k =>  Merge k -> BuildMerge k -> DSum (WrapArg NodeRef k) -> EventM (BuildMerge k)
+subscribeMerge  m (parents, h, values) (WrapArg k :=> nodeRef) = do
+  parent  <- readNodeRef nodeRef
+  height  <- readHeight parent
+  weak    <- subscribe parent sub
+  value   <- readNode parent
+  return ( (WrapArg k :=> MergeParent parent sub weak) : parents
+         , max h height
+         , maybe values (\v -> (k :=> v) : values) value)
 
-  return (WrapArg k :=> MergeParent parent sub weak, height, (k :=>) <$> value)
     where sub = MergeSub m k
 
-
+{-# INLINE makeMerge #-}
 makeMerge :: GCompare k => [DSum (WrapArg NodeRef k)] -> EventM (Node (DMap k))
 makeMerge refs = do
   rec m <- makeMerge' (NodeMerge m) refs
@@ -591,37 +598,38 @@ makeMerge refs = do
 makeMerge' :: GCompare k => Parent (DMap k) -> [DSum (WrapArg NodeRef k)] -> EventM (Merge k)
 makeMerge' parent refs = do
   rec
-    (subs, heights, vals)   <- unzip3 <$> traverse (subscribeMerge m) refs
-    node <- newNode (succ $ foldl' max 0 heights) parent
+    node <- newNode (succ height) parent
+    (subs, height, values)   <- foldM (subscribeMerge m) (mempty, 0, mempty) refs
     m <- Merge node <$> newRef (DMap.fromDistinctAscList subs) <*> newRef DMap.empty
 
-  let values = catMaybes vals
   when (not  (null values)) $ writeNode node (DMap.fromDistinctAscList values)
   return m
 
 
 modifyMerge :: forall k. GCompare k => Merge k -> DMap (WrapArg Event k) -> EventM ()
 modifyMerge m update = do
-
   subs <- readRef (subscribeMerges m)
-  (subs', heights, _) <- unzip3 . catMaybes <$> traverse (addMerge subs)  (DMap.toList update)
-
   height <- readHeight (mergeNode m)
-  let height' = succ $ foldl' max (pred height) heights
+  (subs', height')   <- foldM (addMerge m) (subs, height) (DMap.toList update)
   liftIO $ propagateHeight height' (mergeNode m)
+  writeRef (subscribeMerges m) subs'
 
-  modifyRef (subscribeMerges m) (DMap.union (DMap.fromDistinctAscList subs'))
+
+addMerge :: GCompare k => Merge k -> (DMap (WrapArg MergeParent k), Height) -> DSum (WrapArg Event k) -> EventM (DMap (WrapArg MergeParent k), Height)
+addMerge m (subs, height) (WrapArg (!k) :=> e) = case e of
+  Never -> (,height) <$> remove
+  Event nodeRef -> do
+    parent  <- readNodeRef nodeRef
+    height' <- readHeight parent
+    weak    <- subscribe parent sub
+    subs' <- insert (MergeParent parent sub weak)
+    return (subs', max height (succ height'))
 
   where
-
-    addMerge :: DMap (WrapArg MergeParent k) -> DSum (WrapArg Event k) -> EventM (Maybe (MergeInfo k))
-    addMerge subs (WrapArg k :=> e) = do
-
-      for_ (DMap.lookup (WrapArg k) subs) $ \(MergeParent _ _ weak) -> liftIO $ finalize weak
-      case e of
-        Never      -> return Nothing
-        Event ref  -> Just <$> subscribeMerge m (WrapArg k :=> ref)
-
+    insert p = done $ DMap.insertLookupWithKey' (\_ v _-> v) (WrapArg k) p subs
+    remove   = done $ DMap.updateLookupWithKey (\_ _ -> Nothing) (WrapArg k) subs
+    done (old, subs') = subs' <$ traverse_ (liftIO . finalize . mpWeak) old
+    sub = MergeSub m k
 
 
 
