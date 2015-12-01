@@ -1,4 +1,4 @@
-{-# LANGUAGE ConstraintKinds, TypeSynonymInstances, BangPatterns, ScopedTypeVariables, TupleSections, GADTs, RankNTypes, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE  RecursiveDo, ConstraintKinds, TypeSynonymInstances, BangPatterns, ScopedTypeVariables, TupleSections, GADTs, RankNTypes, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, GeneralizedNewtypeDeriving #-}
 
 module Reflex.Bench.Focused where
 
@@ -11,13 +11,13 @@ import Control.Applicative
 import Data.Foldable
 import Data.Traversable
 
+import Data.Maybe
 import Data.Map (Map)
 import qualified Data.Map as Map
 
+import Data.Tuple
 import Data.List
 import Data.List.Split
-
-import Debug.Trace
 
 import Prelude
 
@@ -29,6 +29,18 @@ mergeTree n es | length es <= n =  sum' es
     merges   = chunksOf n es
     subTrees = map sum' merges
     sum'     = fmap sum . mconcat . fmap (fmap (:[]) )
+
+mergeListDyn :: (Reflex t, MonadHold t m) => [Dynamic t a] -> m (Dynamic t [a])
+mergeListDyn dyns = traverse (mapDyn pure) dyns >>= mconcatDyn
+
+mergeTreeDyn :: (Num a, Reflex t, MonadHold t m, MonadFix m) => Int -> [Dynamic t a] -> m (Dynamic t a)
+mergeTreeDyn n dyns | length dyns <= n = sumDyns dyns
+                    | otherwise = traverse sumDyns merges >>= mergeTreeDyn n
+  where
+    merges   = chunksOf n dyns
+    sumDyns ds     =  mergeListDyn ds >>= mapDyn sum
+
+
 
 -- N events all firing for N frames
 continuous :: TestPlan t m => Word -> Word -> m [Event t Word]
@@ -66,47 +78,67 @@ denseMap :: TestPlan t m => Word -> m (Event t (Map Word Word))
 denseMap n = plan [(1, m)] where
   m = Map.fromList $ zip [1..n] [1..n]
 
--- Create an Event with a Map which is sparse, firing N events over M frames and Fan size S
--- sparseMap ::
--- sparseMap n frames size =   events frames
---   occs = transpose $ chunksOf frames $ flip zip [1..n * frames] $ take (n * frames) $ concat (replicate [1..size])
 
-
-iterateN :: (a -> a) -> a -> Word -> a
-iterateN f a n = iterate f a !! fromIntegral n
 
 fmapChain :: Reflex t => Word -> Event t Word -> (Event t Word)
-fmapChain n e = iterateN (fmap (+1)) e n
+fmapChain 0 e = e
+fmapChain n e = fmapChain (n - 1) (fmap (+1) e)
+
+
+mapDynChain :: (Reflex t, MonadHold t m) => Word -> Dynamic t Word -> m (Dynamic t Word)
+mapDynChain 0 d = return d
+mapDynChain n d = mapDynChain (n - 1) =<< mapDyn (+1) d
+
+
+
+joinDynChain :: (Reflex t, MonadHold t m) => Word -> Dynamic t Word -> m (Dynamic t Word)
+joinDynChain 0 d = return d
+joinDynChain n d = joinDynChain (n - 1) =<< joinDyn <$> mapDyn (const d) d
+
+combineDynChain :: (Reflex t, MonadHold t m) => Word -> Dynamic t Word -> m (Dynamic t Word)
+combineDynChain 0 d = return d
+combineDynChain n d = combineDynChain (n - 1) =<< combineDyn (+) d d
+
+
+pingPong :: (Reflex t, MonadHold t m, MonadFix m) => Event t a -> Event t a -> m (Event t a)
+pingPong e1 e2 = do
+  rec
+    d <- foldDyn (const swap) (e1, e2) e
+    let e = switch (fst <$> current d)
+  return e
 
 
 switchFactors :: (Reflex t, MonadHold t m) => Word -> Event t Word -> m (Event t Word)
-switchFactors n e = iter n e where
-  iter 0 e = return e
-  iter n e = do
-    b <- hold ((+1) <$> e) (e <$ ffilter ((== 0) . (n `mod`)) e)
-    iter (n - 1) (switch b)
+switchFactors 0 e = return e
+switchFactors i e = do
+    b <- hold ((+1) <$> e) (e <$ ffilter ((== 0) . (i `mod`)) e)
+    switchFactors (i - 1) (switch b)
 
 
-switchChain :: (Reflex t, MonadHold t m) => Word -> Event t Word -> m (Event t Word)
-switchChain n e = iter n e where
-  iter 0 e = return e
-  iter n e = do
-    b <- hold e (e <$ e)
-    iter (n - 1) (switch b)
+switchChain :: (Reflex t, MonadHold t m, MonadFix m) => Word -> Event t Word -> m (Event t Word)
+switchChain 0 e = return e
+switchChain i e = switchChain (i - 1) =<< pingPong e ((+1) <$> e)
+
+
+switchChain2 :: (Reflex t, MonadHold t m, MonadFix m) => Word -> Event t Word -> m (Event t Word)
+switchChain2 0 e = return e
+switchChain2 i e = switchChain2 (i - 1) =<< pingPong e ((+1) <$> leftmost [e, e])
 
 switchPromptlyChain :: (Reflex t, MonadHold t m) => Word -> Event t Word -> m (Event t Word)
-switchPromptlyChain n e = iter n e where
-  iter 0 e = return e
-  iter n e = do
+switchPromptlyChain 0 e  = return e
+switchPromptlyChain i e = do
     d <- holdDyn e (e <$ e)
-    iter (n - 1) (switchPromptlyDyn d)
+    switchPromptlyChain (i - 1) (switchPromptlyDyn d)
+
 
 coinChain :: Reflex t => Word -> Event t Word -> Event t Word
-coinChain n e = iterateN (\e' -> coincidence (e' <$ e')) e n
+coinChain 0 e = e
+coinChain n e = coinChain (n - 1) $ coincidence (e <$ e)
 
 
 pullChain :: Reflex t => Word -> Behavior t Word -> Behavior t Word
-pullChain n b = iterateN (fmap (+1)) b n
+pullChain 0 b = b
+pullChain n b = pullChain (n - 1) $ (+1) <$> b
 
 
 
@@ -117,6 +149,11 @@ data UpdatedMap t k a = UpdatedMap (Map k a) (Event t (Map k (Maybe a)))
 -- This will hopefully become a primitive (faster!)
 switchMergeEvents ::  (MonadFix m, MonadHold t m, Reflex t, Ord k) =>  UpdatedMap t k (Event t a)  -> m (Event t (Map k a))
 switchMergeEvents mapChanges = switch . fmap mergeMap  <$> holdMap mapChanges
+
+
+switchMergeMaybe :: (MonadFix m, MonadHold t m, Reflex t, Ord k) =>  UpdatedMap t k (Event t a)  -> m (Event t (Map k a))
+switchMergeMaybe (UpdatedMap initial changes) = switchMergeMap initial (fmap (fromMaybe never) <$> changes)
+
 
 switchMergeBehaviors  :: forall a t m k. (MonadFix m, MonadHold t m, Reflex t, Ord k) =>  UpdatedMap t k (Behavior t a)  -> m (Behavior t (Map k a))
 switchMergeBehaviors mapChanges = pull <$> joinMap <$> holdMap mapChanges
@@ -135,7 +172,6 @@ holdMapDyn (UpdatedMap initial changes) = foldDyn (flip (Map.foldWithKey modify)
 -- | Hold an UpdatedMap as a behavior by applying differences to the initial value
 holdMap :: (Reflex t, MonadHold t m, MonadFix m, Ord k) => UpdatedMap t k a -> m (Behavior t (Map k a))
 holdMap = (current <$>) . holdMapDyn
-
 
 
 increasingMerge :: TestPlan t m => [a] -> m (UpdatedMap t Int a)
@@ -171,7 +207,7 @@ countManyDyn = traverse count
 
 -- Given a function which creates a sub-network (from a single event)
 -- Create a plan which uses a switch to substitute it
-switches :: TestPlan t m => Word -> (forall m. MonadHold t m => Event t Word -> m (Event t a)) -> m (Event t a)
+switches :: TestPlan t m => Word -> (forall n. (MonadHold t n, MonadFix n) => Event t Word -> n (Event t a)) -> m (Event t a)
 switches numFrames f = do
   es <- events numFrames
   switch <$> hold never (makeEvents es)
@@ -197,12 +233,20 @@ subscribing n frames =
 -- a pattern which occurs frequently in reflex-dom collections
 merging :: Word -> [(String, TestCase)]
 merging n =
-  [ testE "increasing events"    $ switchMergeEvents =<< increasingMerge =<< sparse
+  [ testE "static events"        $ mergeList <$> sparse
+  , testE "increasing events"    $ switchMergeEvents =<< increasingMerge =<< sparse
   , testE "decreasing events"    $ switchMergeEvents =<< decreasingMerge =<< sparse
   , testE "modify events"        $ switchMergeEvents =<< modifyMerge =<< sparse
+
+  , testB "static behaviors"     $ pull . traverse sample <$> counters
   , testB "increasing behaviors" $ switchMergeBehaviors =<< increasingMerge =<< counters
   , testB "decreasing behaviors" $ switchMergeBehaviors =<< decreasingMerge =<< counters
   , testB "modify behaviors"     $ switchMergeBehaviors =<< modifyMerge =<< counters
+
+
+  , testE "increasing events/switchMerge"    $ switchMergeMaybe =<< increasingMerge =<< sparse
+  , testE "decreasing events/switchMerge"    $ switchMergeMaybe =<< decreasingMerge =<< sparse
+  , testE "modify events/switchMerge"        $ switchMergeMaybe =<< modifyMerge =<< sparse
   ]
 
   where
@@ -213,9 +257,34 @@ merging n =
     counters = countMany =<< sparse
 
 
+
+dynamics :: Word -> [(String, TestCase)]
+dynamics n =
+  [ testE "mapDynChain"         $ fmap updated $ mapDynChain n =<< d
+  , testE "joinDynChain"        $ fmap updated $ joinDynChain n =<< d
+  , testE "combineDynChain"     $ fmap updated $ combineDynChain n =<< d
+  , testE "dense mergeTree"     $ fmap updated $ mergeTreeDyn 8 =<< dense
+  , testE "sparse mergeTree"    $ fmap updated $ mergeTreeDyn 8 =<< sparse
+  , testE "mergeDyn"            $ fmap updated $ mapDyn sum =<< mergeListDyn =<< sparse
+  ] where
+
+    d :: TestPlan t m => m (Dynamic t Word)
+    d = count =<< events 10
+
+    sparse, dense :: TestPlan t m => m [Dynamic t Int]
+    sparse = countManyDyn =<< occasional n 8 16
+    dense  = countManyDyn =<< continuous n 2
+
+
 firing :: Word -> [(String, TestCase)]
 firing n =
-  [ testE "dense mergeTree"      $ mergeTree 8 <$> dense
+  [ testE "fmapChain"           $ fmapChain n <$> e
+  , testE "switchChain2"        $ switchChain2 n =<< e
+  , testE "switchPromptlyChain" $ switchPromptlyChain n =<< e
+  , testE "switchFactors"       $  switchFactors n =<< e
+  , testE "coincidenceChain"    $ coinChain n <$> e
+
+  , testE "dense mergeTree"      $ mergeTree 8 <$> dense
   , testE "sparse mergeTree"  $ mergeTree 8 <$> sparse
   , testE "runFrame"               $ events n
   , testB "sum counters" $ do
@@ -224,22 +293,27 @@ firing n =
 
   , testB "pullChain"                 $ pullChain n . current <$> (count =<< events 4)
   , testB "pullChain2"                $ do
-    e <- events 4
+    e' <- events 4
     b <- hold (constant 0) $ leftmost
-      [ constant 0 <$ ffilter (==4) e
-      , pushAlways (const $ pullChain n <$> hold 0 e) e
+      [ constant 0 <$ ffilter (==4) e'
+      , pushAlways (const $ pullChain n <$> hold 0 e') e'
       ]
     return (join b)
   , testB "counters/pullTree" $ mergeTree 8 <$> counters
 
   ]
     where
+      e :: TestPlan t m => m (Event t Word)
+      e = events 10
+
       dense, sparse :: TestPlan t m => m [Event t Word]
       dense = continuous n 2
       sparse = occasional n 8 16
 
       counters :: TestPlan t m => m [Behavior t Int]
       counters = countMany =<< sparse
+
+
 
 
 
