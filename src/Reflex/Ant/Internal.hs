@@ -311,7 +311,7 @@ makeWeak !a finalizer = liftIO $ mkWeakPtr a finalizer
 
 {-# INLINE subscribe #-}
 subscribe :: MonadIORef m => Node a -> Subscription a -> m (Weak (Subscription a))
-subscribe node !sub = liftIO $ do
+subscribe node sub = liftIO $ do
   weakSub <- makeWeak sub Nothing
   modifyRef (nodeSubs node) (weakSub :)
   return weakSub
@@ -599,10 +599,10 @@ makeMerge' :: GCompare k => Parent (DMap k) -> [DSum (WrapArg NodeRef k)] -> Eve
 makeMerge' parent refs = do
   rec
     node <- newNode (succ height) parent
-    (subs, height, values)   <- foldM (subscribeMerge m) (mempty, 0, mempty) refs
-    m <- Merge node <$> newRef (DMap.fromDistinctAscList subs) <*> newRef DMap.empty
+    (subs, height, values)   <- foldlM (subscribeMerge m) (mempty, 0, mempty) refs
+    m <- Merge node <$> newRef (DMap.fromDistinctAscList (reverse subs)) <*> newRef DMap.empty
 
-  when (not  (null values)) $ writeNode node (DMap.fromDistinctAscList values)
+  when (not  (null values)) $ writeNode node (DMap.fromDistinctAscList (reverse values))
   return m
 
 
@@ -610,7 +610,7 @@ modifyMerge :: forall k. GCompare k => Merge k -> DMap (WrapArg Event k) -> Even
 modifyMerge m update = do
   subs <- readRef (subscribeMerges m)
   height <- readHeight (mergeNode m)
-  (subs', height')   <- foldM (addMerge m) (subs, height) (DMap.toList update)
+  (subs', height')   <- foldlM (addMerge m) (subs, height) (DMap.toList update)
   liftIO $ propagateHeight height' (mergeNode m)
   writeRef (subscribeMerges m) subs'
 
@@ -626,8 +626,13 @@ addMerge m (subs, height) (WrapArg (!k) :=> e) = case e of
     return (subs', max height (succ height'))
 
   where
-    insert p = done $ DMap.insertLookupWithKey' (\_ v _-> v) (WrapArg k) p subs
-    remove   = done $ DMap.updateLookupWithKey (\_ _ -> Nothing) (WrapArg k) subs
+    insert p =  --done $ DMap.insertLookupWithKey' (\_ v _-> v) (WrapArg k) p subs
+      done (DMap.lookup (WrapArg k) subs, DMap.insert (WrapArg k) p subs)
+
+    remove   = --done $ DMap.updateLookupWithKey (\_ _ -> Nothing) (WrapArg k) subs
+      done (DMap.lookup (WrapArg k) subs, DMap.delete (WrapArg k) subs)
+
+
     done (old, subs') = subs' <$ traverse_ (liftIO . finalize . mpWeak) old
     sub = MergeSub m k
 
@@ -876,7 +881,6 @@ invalidate = traverse_  invalidate' where
 
   invalidate' (SwitchInv ws) =
     forWeak ws $ \s -> modify (Connect s:)
-
 
 
 -- | Propagate changes in height from a coincidence or switch

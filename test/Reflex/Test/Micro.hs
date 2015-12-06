@@ -58,6 +58,18 @@ testCases =
   , testE "appendEvents-1" $ liftA2 appendEvents events1 events2
   , testE "appendEvents-2" $ liftA2 appendEvents events3 events2
 
+
+  , testE "merge-1" $ do
+      e <- events1
+      return $ leftmost ["x" <$ e, "y" <$ e]
+
+  , testE "merge-2" $ do
+      e <- events1
+      let m = mergeMap $ Map.fromList [(1::Int, "y" <$ e), (2, "z" <$ e)]
+
+      let ee = flip pushAlways e $ const $ return m
+      return $ coincidence ee
+
   , testE "onceE-1" $ do
       e <- events1
       onceE $ leftmost [e, e]
@@ -77,16 +89,28 @@ testCases =
   , testE "switch-2" $ do
       e <- events1
       return $ coincidence $ flip pushAlways e $ const $ do
-            switch <$> hold (leftmost ["a" <$ e, "b" <$ e]) (e <$ e)
+            switch <$> hold (leftmost ["x" <$ e, "y" <$ e, "z" <$ e]) (e <$ e)
 
   , testE "switch-3" $ do
       e <- events1
       return $ coincidence $ flip pushAlways e $ const $ do
-          switch <$> hold (leftmost ["a" <$ e, "b" <$ e]) never
+          switch <$> hold (leftmost ["x" <$ e, "y" <$ e, "z" <$ e]) never
 
   , testE "switch-4" $ do
       e <- events1
       switch <$> hold (deep e) (e <$ e)
+
+
+  , testE "switch-5" $ do
+      e <- events1
+      return $ coincidence $ flip pushAlways e $ const $
+        return $ leftmost ["x" <$ e, "y" <$ e, "z" <$ e]
+
+  , testE "switch-6" $ do
+      e <- events1
+      return $ coincidence $ flip pushAlways e $ const $ do
+            switch <$> hold ("x" <$ e) (e <$ e)
+
 
   , testE "switchPromptly-1" $ do
       e <- events1
