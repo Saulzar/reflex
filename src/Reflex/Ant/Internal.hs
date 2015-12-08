@@ -100,7 +100,7 @@ instance Show (Subscription a) where
   show (FanSub    {}) = "Fan"
 
 
-data Parent a where
+data Node a where
   NodePush   :: Push a b      -> Parent b
   NodeMerge  :: Merge k       -> Parent (DMap k)
   NodeSwitch :: Switch a      -> Parent a
@@ -109,12 +109,13 @@ data Parent a where
   NodeFan    :: Fan k -> k a  -> Parent a
   NodeRoot   ::                  Parent a
 
-data Node a = Node
-  { nodeSubs      :: !(IORef [Weak (Subscription a)])
-  , nodeHeight    :: !(IORef Int)
-  , nodeParents   :: (Parent a)
-  , nodeOcc     :: !(IORef (Maybe a))
-  }
+
+
+
+data Subs a
+  = None
+  | Single (Subscription a)
+  | Hub !(IORef [Weak (Subscription a)]) !(IORef Int) !(IORef (Maybe a))
 
 
 data Invalidator where
@@ -122,7 +123,7 @@ data Invalidator where
   SwitchInv :: Weak (Switch a) -> Invalidator
 
 data Push a b = Push
-  { pushNode    :: !(Node b)
+  { pushSubs    :: !(IORef (Subs b))
   , pushParent  :: Node a
   , pushCompute :: a -> EventM (Maybe b)
   , pushSub     :: Subscription a
