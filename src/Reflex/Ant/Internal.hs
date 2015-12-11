@@ -627,12 +627,8 @@ addMerge m (subs, height) (WrapArg (!k) :=> e) = case e of
     return (subs', max height (succ height'))
 
   where
-    insert p =  --done $ DMap.insertLookupWithKey' (\_ v _-> v) (WrapArg k) p subs
-      done (DMap.lookup (WrapArg k) subs, DMap.insert (WrapArg k) p subs)
-
-    remove   = --done $ DMap.updateLookupWithKey (\_ _ -> Nothing) (WrapArg k) subs
-      done (DMap.lookup (WrapArg k) subs, DMap.delete (WrapArg k) subs)
-
+    insert p = done $ DMap.insertLookupWithKey' (\_ v _-> v) (WrapArg k) p subs
+    remove   = done $ DMap.updateLookupWithKey (\_ _ -> Nothing) (WrapArg k) subs
 
     done (old, subs') = subs' <$ traverse_ (liftIO . finalize . mpWeak) old
     sub = MergeSub m k

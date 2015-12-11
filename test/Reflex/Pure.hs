@@ -76,8 +76,6 @@ instance (Enum t, HasTrie t, Ord t) => MonadHold (Pure t) ((->) t) where
                    Nothing -> f lastTime
                    Just x  -> x
 
-  switchMerge initial updates = do
-    es <- current <$> foldDyn DMap.union initial updates
-    return (switch $ merge <$> es)
+  switchMerge = switchMerge'
 
 
