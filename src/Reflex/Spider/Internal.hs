@@ -1330,6 +1330,7 @@ instance R.MonadSample Spider SpiderHost where
 
 instance R.MonadHold Spider SpiderHost where
   hold v0 = SpiderHost . liftM SpiderBehavior . runFrame . hold v0 . unSpiderEvent
+  switchMerge = R.switchMerge'
 
 instance R.MonadSample Spider BehaviorM where
   {-# INLINE sample #-}
@@ -1342,6 +1343,8 @@ instance R.MonadSample Spider EventM where
 instance R.MonadHold Spider EventM where
   {-# INLINE hold #-}
   hold v0 e = SpiderBehavior <$> hold v0 (unSpiderEvent e)
+  switchMerge = R.switchMerge'
+
 
 data RootTrigger a = forall k. GCompare k => RootTrigger (IORef [WeakSubscriber a], IORef (DMap k), k a)
 newtype SpiderEventHandle a = SpiderEventHandle { unEventHandle :: Event a }
@@ -1383,6 +1386,7 @@ instance R.MonadSample Spider SpiderHostFrame where
 instance R.MonadHold Spider SpiderHostFrame where
   {-# INLINE hold #-}
   hold v0 e = SpiderHostFrame $ R.hold v0 e
+  switchMerge = R.switchMerge'
 
 newEventWithTriggerIO :: forall a. (RootTrigger a -> IO (IO ())) -> IO (Event a)
 newEventWithTriggerIO f = do

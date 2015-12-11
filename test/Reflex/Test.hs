@@ -10,6 +10,7 @@ module Reflex.Test
   ) where
 
 import Reflex.Ant
+import Reflex.Spider
 
 import Reflex.TestPlan
 
@@ -28,17 +29,19 @@ import Prelude
 
 
 testAgreement :: TestCase -> IO Bool
-testAgreement (TestE plan) = do
-  ant    <- runAntHost $ runTestE plan
-  let results = [ ("ant", ant)]
+testAgreement (TestE p) = do
+  ant    <- runAntHost $ runTestE p
+  spider <- runSpiderHost $ runTestE p
+  let results = [("ant", ant), ("spider", spider)]
 
-  compareResult results (testEvent $ runPure plan)
+  compareResult results (testEvent $ runPure p)
 
-testAgreement (TestB plan) = do
-  ant    <- runAntHost $ runTestB plan
-  let results = [ ("ant", ant)]
+testAgreement (TestB p) = do
+  ant    <- runAntHost $ runTestB p
+  spider <- runSpiderHost $ runTestB p
+  let results = [("ant", ant), ("spider", spider)]
 
-  compareResult results (testBehavior $ runPure plan)
+  compareResult results (testBehavior $ runPure p)
 
 
 compareResult :: (Show a, Eq a) => [(String, IntMap a)] -> IntMap a -> IO Bool
