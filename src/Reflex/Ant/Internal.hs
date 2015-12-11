@@ -972,6 +972,7 @@ fireEvents triggers = fireEventsAndRead triggers (return ())
 
 data Ant
 
+
 instance R.Reflex Ant where
   newtype Behavior Ant a = AntBehavior { unAntBehavior :: Behavior a }
   newtype Event Ant a = AntEvent { unAntEvent :: Event a }
@@ -987,6 +988,10 @@ instance R.Reflex Ant where
   fan e = R.EventSelector $ AntEvent . select (fan (unAntEvent e))
   switch = AntEvent . switch . (unsafeCoerce :: Behavior (R.Event Ant a) -> Behavior (Event a)) . unAntBehavior
   coincidence = AntEvent . coincidence . (unsafeCoerce :: Event (R.Event Ant a) -> Event (Event a)) . unAntEvent
+
+
+instance Functor (R.Behavior Ant) where
+  fmap f = R.pull . fmap f . R.sample
 
 
 --HostFrame instances

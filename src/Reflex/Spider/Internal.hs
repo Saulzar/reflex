@@ -1321,6 +1321,9 @@ instance R.Reflex Spider where
   switch = SpiderEvent . switch . (unsafeCoerce :: Behavior (R.Event Spider a) -> Behavior (Event a)) . unSpiderBehavior
   coincidence = SpiderEvent . coincidence . (unsafeCoerce :: Event (R.Event Spider a) -> Event (Event a)) . unSpiderEvent
 
+instance Functor (R.Behavior Spider) where
+  fmap f = R.pull . fmap f . R.sample
+
 instance R.MonadSample Spider SpiderHost where
   {-# INLINE sample #-}
   sample = SpiderHost . readBehavior . unSpiderBehavior

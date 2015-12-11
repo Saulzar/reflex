@@ -4,7 +4,7 @@ of Reflex should produce the same results as this implementation, although perfo
 and laziness/strictness may differ.
 -}
 
-{-# LANGUAGE TypeFamilies, MultiParamTypeClasses, EmptyDataDecls, InstanceSigs #-}
+{-# LANGUAGE FlexibleInstances, TypeFamilies, MultiParamTypeClasses, EmptyDataDecls, InstanceSigs #-}
 module Reflex.Pure where
 
 import Reflex.Class
@@ -56,6 +56,9 @@ instance (Enum t, HasTrie t, Ord t) => Reflex (Pure t) where
 
   coincidence :: Event (Pure t) (Event (Pure t) a) -> Event (Pure t) a
   coincidence e = Event $ memo $ \t -> unEvent e t >>= \o -> unEvent o t
+
+instance Ord t => Functor (Behavior (Pure t)) where
+  fmap f = Behavior . fmap f . unBehavior
 
 instance Ord t => MonadSample (Pure t) ((->) t) where
 

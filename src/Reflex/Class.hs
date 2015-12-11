@@ -125,8 +125,6 @@ pushAlways f = push (liftM Just . f)
 ffor :: Functor f => f a -> (a -> b) -> f b
 ffor = flip fmap
 
-instance Reflex t => Functor (Behavior t) where
-  fmap f = pull . liftM f . sample
 
 instance Reflex t => Applicative (Behavior t) where
   pure = constant
