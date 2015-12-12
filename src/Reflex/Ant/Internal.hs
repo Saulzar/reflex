@@ -293,10 +293,17 @@ readHeight :: MonadIORef m => Node a -> m Int
 readHeight node = readRef (nodeHeight node)
 
 {-# INLINE newNode #-}
-newNode :: MonadIO m => Height -> Parent a -> m (Node a)
-newNode height parents = liftIO $
-    Node <$> newRef Empty <*> newRef height <*> pure parents <*> newRef Nothing
+newNode :: MonadIORef m => Height -> Parent a -> m (Node a)
+newNode height parents = do
+  heightRef <- newRef height
+  newNode' heightRef parents
 
+
+
+{-# INLINE newNode' #-}
+newNode' :: MonadIORef m => Ref m Height -> Parent a -> m (Node a)
+newNode' height parents = liftIO $
+    Node <$> newRef Empty <*> pure height <*> pure parents <*> newRef Nothing
 
 {-# INLINE readNode #-}
 readNode :: MonadIORef m => Node a -> m (Maybe a)
@@ -775,6 +782,7 @@ newEventWithTrigger f = do
   es <- newFanEventWithTrigger $ \Refl -> f
   return $ select es Refl
 
+
 makeRoot :: GCompare k => k a -> Root k -> EventM (Node a)
 makeRoot k (Root nodes subscr) = liftIO $ lookupFan nodes k $ do
   node       <- newNode 0 NodeRoot
@@ -783,10 +791,9 @@ makeRoot k (Root nodes subscr) = liftIO $ lookupFan nodes k $ do
 
   return (node, weak)
 
-{-# INLINE traverseWeakSubs #-}
 traverseWeakSubs :: MonadIORef m => (Subscription a -> m ()) -> [Weak (Subscription a)] -> m [Weak (Subscription a)]
 traverseWeakSubs f = foldlM acc [] where
-  acc subs (!weak) = do
+  acc subs !weak = do
     m <- liftIO (deRefWeak weak)
     case m of
       Nothing  -> return subs
@@ -796,7 +803,6 @@ traverseWeakSubs f = foldlM acc [] where
 -- Be careful to read the subscriber list atomically, in case the actions run on the subscriber
 -- result in changes to the subscriber list!
 -- In which case we need to be very careful not to lose any new subscriptions
-{-# INLINE traverseSubs #-}
 traverseSubs :: MonadIORef m =>  (Subscription a -> m ()) -> Node a -> m ()
 traverseSubs f node = do
   hub <- readRef (nodeHub node)
@@ -918,6 +924,7 @@ traverseWeak f weak = liftIO (deRefWeak weak) >>= traverse_ f
 forWeak :: MonadIO m => Weak a -> (a -> m ()) -> m ()
 forWeak = flip traverseWeak
 
+
 invalidate :: [Invalidator] -> InvalidateM ()
 invalidate = traverse_  invalidate' where
   invalidate' (PullInv wp) = forWeak wp $ \p -> do
@@ -948,13 +955,12 @@ propagateHeight newHeight node = do
       HoldSub {}        -> return ()
 
       -- Have a shared 'height' therefore it doesn't need checking
-      FanSub f    ->  traverseWeakNodes propagateHeight' (fanNodes f)
-      PushSub p   -> propagateHeight' (pushNode p)
+      FanSub f    ->  traverseWeakNodes (propagateHeight newHeight) (fanNodes f)
+      PushSub p   -> propagateHeight newHeight (pushNode p)
 
       SwitchSub s -> propagateHeight newHeight (switchNode s)
       CoinInner c -> propagateHeight newHeight (coinNode c)
       CoinOuter c -> propagateHeight newHeight (coinNode c)
-
 
 
 traverseDest :: MonadIORef m => (forall b. Node b -> m ()) -> Subscription a -> m ()
