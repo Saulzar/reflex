@@ -83,7 +83,7 @@ data Subscription a where
   PushSub   :: Push a b -> Subscription a
   MergeSub  :: GCompare k => Merge k -> !(k a) -> Subscription a
   SwitchMergeSub :: GCompare k => Merge k -> Subscription (DMap (WrapArg Event k))
-  FanSub    :: GCompare k => Fan k -> Subscription (DMap k)
+  --FanSub    :: GCompare k => Fan k -> Subscription (DMap k)
   HoldSub   :: Node a -> Hold a -> Subscription a
   SwitchSub :: Switch a -> Subscription a
   CoinInner :: Coincidence a -> Subscription a
@@ -101,29 +101,28 @@ instance Show (Subscription a) where
 
 
 data Node a where
-  NodePush   :: Push a b      -> Parent b
-  NodeMerge  :: Merge k       -> Parent (DMap k)
-  NodeSwitch :: Switch a      -> Parent a
-  NodeSwitchMerge :: SwitchMerge k -> Parent (DMap k)
-  NodeCoin   :: Coincidence a -> Parent a
-  NodeFan    :: Fan k -> k a  -> Parent a
-  NodeRoot   ::                  Parent a
+  PushNode   :: Push a b      -> Node b
+  MergeNode  :: Merge k       -> Node (DMap k)
+  SwitchNode :: Switch a      -> Node a
+  SwitchMergeNode :: SwitchMerge k -> Node (DMap k)
+  CoinNode   :: Coincidence a   -> Node a
+  RootNode   :: Root k -> Hub a -> Node a
+
+  -- FanNode    :: Fan k -> k a -> Hub a -> Node a
 
 
-
-
-data Subs a
-  = None
-  | Single (Subscription a)
-  | Hub !(IORef [Weak (Subscription a)]) !(IORef Int) !(IORef (Maybe a))
-
+data Hub a = Hub
+  { hubSubs   :: !(IORef [Weak (Subscription a)])
+  , hubHeight :: !(IORef Int)
+  , hubOcc :: !(IORef (Maybe a))
+  }
 
 data Invalidator where
   PullInv   :: Weak (Pull a)   -> Invalidator
   SwitchInv :: Weak (Switch a) -> Invalidator
 
 data Push a b = Push
-  { pushSubs    :: !(IORef (Subs b))
+  { pushHub    :: !Hub b
   , pushParent  :: Node a
   , pushCompute :: a -> EventM (Maybe b)
   , pushSub     :: Subscription a
@@ -145,7 +144,7 @@ data Hold a = Hold
 type NodeSub a     = (Node a, Weak (Subscription a))
 
 data Switch a = Switch
-  { switchNode   :: Node a
+  { switchHub   :: Hub a
   , switchSub    :: Subscription a
   , switchConn   :: !(IORef (Maybe (NodeSub a)))
   , switchInv    :: Invalidator
@@ -153,7 +152,7 @@ data Switch a = Switch
   }
 
 data Coincidence a = Coincidence
-  { coinNode     :: Node a
+  { coinHub     :: Hub a
   , coinParent   :: Node (Event a)
   , coinOuterSub :: Subscription (Event a)
   , coinInnerSub :: Subscription a
@@ -201,13 +200,13 @@ data DelayedConnect where
   Disconnect    :: !(NodeSub a) -> DelayedConnect
   ConnectMerge  :: GCompare k => Merge k -> DMap (WrapArg Event k) -> DelayedConnect
 
-data SomeNode       where SomeNode       :: !(Node a)    -> SomeNode
+data SomeIORef       where SomeIORef       :: !(IORef a)    -> SomeIORef
 
 
 -- EvenM environment, lists of things which need attention at the end of a frame
 data Env = Env
   { envDelays       :: !(IORef (IntMap [DelayMerge]))
-  , envClears       :: !(IORef [SomeNode])
+  , envClears       :: !(IORef [SomeIORef])
   , envHolds        :: !(IORef [WriteHold])
   , envHoldInits    :: !(IORef [HoldInit])
   , envConnects     :: !(IORef [DelayedConnect])
@@ -287,24 +286,40 @@ readHeight :: MonadIORef m => Node a -> m Int
 readHeight node = readRef (nodeHeight node)
 
 {-# INLINE newNode #-}
-newNode :: MonadIO m => Height -> Parent a -> m (Node a)
-newNode height parents = liftIO $
-    Node <$> newRef [] <*> newRef height <*> pure parents <*> newRef Nothing
+newHub :: MonadIO m => Height ->  m (Hub a)
+newHub height parents = liftIO $
+    Hub <$> newRef [] <*> newRef height <*>  newRef Nothing
 
 
 {-# INLINE readNode #-}
 readNode :: MonadIORef m => Node a -> m (Maybe a)
-readNode node = readRef (nodeOcc node)
+readNode node = do
+  hub <- nodeHub node
+  readRef (hubOcc hub)
 
-writeNode :: Node a -> a -> EventM ()
-writeNode node a = do
-  writeRef (nodeOcc node) (Just a)
-  clearsRef <- asks envClears
-  modifyRef clearsRef (SomeNode node :)
+-- writeNode :: Node a -> a -> EventM ()
+-- writeNode node a = do
+--   writeRef (nodeOcc node) (Just a)
+--   clearsRef <- asks envClears
+--   modifyRef clearsRef (SomeNode node :)
+
+nodeHub :: MonadIORef m => Node a -> m (Hub a)
+nodeHub (PushNode p)         = return $ pushHub p
+nodeHub (MergeNode  m)       = return $ mergeHub m
+nodeHub (SwitchNode s)       = return $ switchHub s
+nodeHub (SwitchMergeNode sm) = return $ mergeHub $ smMerge  sm
+nodeHub (CoinNode c)         = return $ coinHub c
+nodeHub (RootNode _ h)       = return h
+
 
 {-# INLINE readEvent #-}
 readEvent :: EventHandle a -> IO (Maybe a)
 readEvent (EventHandle n) = join <$> traverse readNode n
+
+
+
+
+
 
 {-# INLINE makeWeak #-}
 makeWeak :: MonadIO m => a -> Maybe (IO ()) -> m (Weak a)
@@ -518,52 +533,47 @@ connectDelayed (Disconnect (_, weakSub)) = finalize weakSub
 connectDelayed (ConnectMerge m u) = evalEventM $ modifyMerge m u
 
 
-
 push :: (a -> EventM (Maybe b)) -> Event a -> Event b
 push _ Never = Never
 push f (Event ref) = unsafeCreateEvent $ MakePush ref f
 
-pushAlways :: (a -> EventM b) -> Event a -> Event b
-pushAlways f = push (fmap Just . f)
 
 makePush :: NodeRef a -> (a -> EventM (Maybe b)) -> EventM (Node b)
 makePush ref f =  do
-  parent <- readNodeRef ref
-  height <- readHeight parent
-
   rec
-    let p   = Push node parent f sub
+    (parent, height, value) <- subscribeNode_ ref sub
+    hub <- newHub height
+
+    let p   = Push hub parent f sub
         sub = PushSub p
-    node <- newNode height (NodePush p)
 
-  m <- readNode parent
-  traverse_ (f >=> traverse_ (writeNode node)) m
-
-  subscribe_ parent sub
-  return node
+    traverse_ (f >=> traverse_ (writeHub hub)) m
+    return (NodePush node)
 
 
 
 
 switchMerge :: GCompare k => DMap (WrapArg Event k) -> Event (DMap (WrapArg Event k)) -> EventM (Event (DMap k))
-switchMerge es e = case e of
-  Never     -> liftIO $ createEvent (MakeMerge refs)
-  Event ref -> makeEvent $ do
-    parent <- readNodeRef ref
-    value <- readNode parent
+switchMerge = undefined
 
-    rec
-      let sub = SwitchMergeSub m
-          sm = SwitchMerge m parent sub
+-- switchMerge es e = case e of
+--   Never     -> liftIO $ createEvent (MakeMerge refs)
+--   Event ref -> makeEvent $ do
+--     parent <- readNodeRef ref
+--     value <- readNode parent
 
-      m <- makeMerge' (NodeSwitchMerge sm) refs
+--     rec
+--       let sub = SwitchMergeSub m
+--           sm = SwitchMerge m parent sub
 
-    traverse_  (delayConnect . ConnectMerge m) value
-    subscribe_ parent sub
-    return (mergeNode m)
+--       m <- makeMerge' (NodeSwitchMerge sm) refs
 
-  where
-    refs = catEvents (DMap.toList es)
+--     traverse_  (delayConnect . ConnectMerge m) value
+--     subscribe_ parent sub
+--     return (mergeNode m)
+
+--   where
+--     refs = catEvents (DMap.toList es)
 
 
 
@@ -573,16 +583,12 @@ merge events = case catEvents (DMap.toAscList events) of
   refs -> unsafeCreateEvent (MakeMerge refs)
 
 
-
 type BuildMerge k = ([DSum (WrapArg MergeParent k)], Height, [DSum k])
 
 {-# INLINE subscribeMerge #-}
 subscribeMerge :: GCompare k =>  Merge k -> BuildMerge k -> DSum (WrapArg NodeRef k) -> EventM (BuildMerge k)
 subscribeMerge  m (parents, h, values) (WrapArg k :=> nodeRef) = do
-  parent  <- readNodeRef nodeRef
-  height  <- readHeight parent
-  weak    <- subscribe parent sub
-  value   <- readNode parent
+  (parent, height, value, weak) <- subscribeNode nodeRef sub
   return ( (WrapArg k :=> MergeParent parent sub weak) : parents
          , max h height
          , maybe values (\v -> (k :=> v) : values) value)
@@ -608,30 +614,31 @@ makeMerge' parent refs = do
 
 
 modifyMerge :: forall k. GCompare k => Merge k -> DMap (WrapArg Event k) -> EventM ()
-modifyMerge m update = do
-  subs <- readRef (subscribeMerges m)
-  height <- readHeight (mergeNode m)
-  (subs', height')   <- foldlM (addMerge m) (subs, height) (DMap.toList update)
-  liftIO $ propagateHeight height' (mergeNode m)
-  writeRef (subscribeMerges m) subs'
+modifyMerge = undefined
+-- modifyMerge m update = do
+--   subs <- readRef (subscribeMerges m)
+--   height <- readHeight (mergeNode m)
+--   (subs', height')   <- foldlM (addMerge m) (subs, height) (DMap.toList update)
+--   liftIO $ propagateHeight height' (mergeNode m)
+--   writeRef (subscribeMerges m) subs'
 
 
-addMerge :: GCompare k => Merge k -> (DMap (WrapArg MergeParent k), Height) -> DSum (WrapArg Event k) -> EventM (DMap (WrapArg MergeParent k), Height)
-addMerge m (subs, height) (WrapArg (!k) :=> e) = case e of
-  Never -> (,height) <$> remove
-  Event nodeRef -> do
-    parent  <- readNodeRef nodeRef
-    height' <- readHeight parent
-    weak    <- subscribe parent sub
-    subs' <- insert (MergeParent parent sub weak)
-    return (subs', max height (succ height'))
+-- addMerge :: GCompare k => Merge k -> (DMap (WrapArg MergeParent k), Height) -> DSum (WrapArg Event k) -> EventM (DMap (WrapArg MergeParent k), Height)
+-- addMerge m (subs, height) (WrapArg (!k) :=> e) = case e of
+--   Never -> (,height) <$> remove
+--   Event nodeRef -> do
+--     parent  <- readNodeRef nodeRef
+--     height' <- readHeight parent
+--     weak    <- subscribe parent sub
+--     subs' <- insert (MergeParent parent sub weak)
+--     return (subs', max height (succ height'))
 
-  where
-    insert p = done $ DMap.insertLookupWithKey' (\_ v _-> v) (WrapArg k) p subs
-    remove   = done $ DMap.updateLookupWithKey (\_ _ -> Nothing) (WrapArg k) subs
+--   where
+--     insert p = done $ DMap.insertLookupWithKey' (\_ v _-> v) (WrapArg k) p subs
+--     remove   = done $ DMap.updateLookupWithKey (\_ _ -> Nothing) (WrapArg k) subs
 
-    done (old, subs') = subs' <$ traverse_ (liftIO . finalize . mpWeak) old
-    sub = MergeSub m k
+--     done (old, subs') = subs' <$ traverse_ (liftIO . finalize . mpWeak) old
+--     sub = MergeSub m k
 
 
 
@@ -641,21 +648,24 @@ never = Never
 
 
 fan :: (GCompare k) => Event (DMap k) -> EventSelector k
-fan Never = EventSelector $ const Never
-fan (Event ref) = EventSelector $ \k -> unsafeCreateEvent (MakeFan k fanRef) where
-  {-# NOINLINE fanRef #-}  -- Would be safe, but not efficient/useful if child nodes didn't point at the same fan
-  fanRef = unsafeLazy ref
+fan = undefined
+
+-- fan Never = EventSelector $ const Never
+-- fan (Event ref) = EventSelector $ \k -> unsafeCreateEvent (MakeFan k fanRef) where
+--   {-# NOINLINE fanRef #-}  -- Would be safe, but not efficient/useful if child nodes didn't point at the same fan
+--   fanRef = unsafeLazy ref
 
 
 makeFan :: GCompare k => NodeRef (DMap k) -> EventM (Fan k)
-makeFan ref = do
-  parent <- readNodeRef ref
-  rec
-    let sub = FanSub fan'
-    fan' <- Fan parent sub <$> newRef DMap.empty
+makeFan = undefined
+-- makeFan ref = do
+--   parent <- readNodeRef ref
+--   rec
+--     let sub = FanSub fan'
+--     fan' <- Fan parent sub <$> newRef DMap.empty
 
-  subscribe_ parent sub
-  return fan'
+--   subscribe_ parent sub
+--   return fan'
 
 lookupWeakNode :: GCompare k =>  DMap (WrapArg WeakNode k) -> k a -> IO (Maybe (Node a))
 lookupWeakNode nodes k = case DMap.lookup (WrapArg k) nodes of
@@ -704,19 +714,20 @@ lookupFan nodesRef k create = do
 
 
 makeFanNode :: GCompare k => FanRef k -> k a -> EventM (Node a)
-makeFanNode fanRef k = do
-  f <- readLazy makeFan fanRef
-  lookupFan (fanNodes f) k $ do
-    height <- readHeight (fanParent f)
+makeFanNode = undefined
+-- makeFanNode fanRef k = do
+--   f <- readLazy makeFan fanRef
+--   lookupFan (fanNodes f) k $ do
+--     height <- readHeight (fanParent f)
 
-    node <- newNode height (NodeFan f k)
-    weak <- makeWeak node Nothing
+--     node <- newNode height (NodeFan f k)
+--     weak <- makeWeak node Nothing
 
-    readNode (fanParent f) >>= traverse_ (writeOcc node)
-    return (node, weak)
+--     readNode (fanParent f) >>= traverse_ (writeOcc node)
+--     return (node, weak)
 
-  where
-    writeOcc node occ = traverse_ (writeNode node) (DMap.lookup k occ)
+--   where
+--     writeOcc node occ = traverse_ (writeNode node) (DMap.lookup k occ)
 
 
 newEventWithFire :: IO (Event a, a -> DSum Trigger)
