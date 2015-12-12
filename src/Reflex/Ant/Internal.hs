@@ -80,14 +80,14 @@ newtype EventSelector k = EventSelector { select :: forall a. k a -> Event a }
 type Height = Int
 
 data Subscription a where
-  PushSub   :: Push a b -> Subscription a
+  PushSub   :: Push a b                   -> Subscription a
   MergeSub  :: GCompare k => Merge k -> !(k a) -> Subscription a
   SwitchMergeSub :: GCompare k => Merge k -> Subscription (DMap (WrapArg Event k))
-  FanSub    :: GCompare k => Fan k -> Subscription (DMap k)
-  HoldSub   :: Node a -> Hold a -> Subscription a
-  SwitchSub :: Switch a -> Subscription a
-  CoinInner :: Coincidence a -> Subscription a
-  CoinOuter :: Coincidence a -> Subscription (Event a)
+  FanSub    :: GCompare k => Fan k        -> Subscription (DMap k)
+  HoldSub   :: Node a  -> Hold a          -> Subscription a
+  SwitchSub :: Switch a                   -> Subscription a
+  CoinInner :: Coincidence a              -> Subscription a
+  CoinOuter :: Coincidence a              -> Subscription (Event a)
 
 instance Show (Subscription a) where
   show (PushSub   {}) = "Push"
@@ -109,10 +109,17 @@ data Parent a where
   NodeFan    :: Fan k -> k a  -> Parent a
   NodeRoot   ::                  Parent a
 
+
+data Hub a
+  = Empty
+  | Single !(Subscription a)
+  | Many ![Weak (Subscription a)]
+
+
 data Node a = Node
-  { nodeSubs      :: !(IORef [Weak (Subscription a)])
-  , nodeHeight    :: !(IORef Int)
-  , nodeParents   :: (Parent a)
+  { nodeHub      :: !(IORef (Hub a))
+  , nodeHeight   :: !(IORef Int)
+  , nodeParents  :: (Parent a)
   , nodeOcc     :: !(IORef (Maybe a))
   }
 
@@ -288,7 +295,7 @@ readHeight node = readRef (nodeHeight node)
 {-# INLINE newNode #-}
 newNode :: MonadIO m => Height -> Parent a -> m (Node a)
 newNode height parents = liftIO $
-    Node <$> newRef [] <*> newRef height <*> pure parents <*> newRef Nothing
+    Node <$> newRef Empty <*> newRef height <*> pure parents <*> newRef Nothing
 
 
 {-# INLINE readNode #-}
@@ -309,16 +316,46 @@ readEvent (EventHandle n) = join <$> traverse readNode n
 makeWeak :: MonadIO m => a -> Maybe (IO ()) -> m (Weak a)
 makeWeak !a finalizer = liftIO $ mkWeakPtr a finalizer
 
+{-# INLINE insertHub_ #-}
+insertHub_ :: Subscription a -> Hub a -> IO (Hub a)
+insertHub_ sub hub = case hub of
+    Empty -> return (Single sub)
+    Single sub' -> do
+      weak <- makeWeak sub Nothing
+      weak' <- makeWeak sub' Nothing
+      return $ Many [weak, weak']
+    Many subs -> do
+      weak <- makeWeak sub Nothing
+      return $ Many (weak : subs)
+
+{-# INLINE toWeak #-}
+toWeak :: Hub a -> IO [Weak (Subscription a)]
+toWeak Empty        = pure []
+toWeak (Single sub) = pure <$> makeWeak sub Nothing
+toWeak (Many subs)  = pure subs
+
+{-# INLINE insertHub #-}
+insertHub :: Subscription a -> Hub a -> IO (Hub a, Weak (Subscription a))
+insertHub sub hub = do
+  subs <- toWeak hub
+  weak <- makeWeak sub Nothing
+  return (Many (weak : subs), weak)
+
+{-# INLINE joinHubs #-}
+joinHubs :: Hub a -> Hub a -> IO (Hub a)
+joinHubs Empty hub = return hub
+joinHubs (Single sub) hub = insertHub_ sub hub
+joinHubs (Many subs) hub = do
+  subs' <- toWeak hub
+  return (Many (subs <> subs'))
+
 {-# INLINE subscribe #-}
 subscribe :: MonadIORef m => Node a -> Subscription a -> m (Weak (Subscription a))
-subscribe node sub = liftIO $ do
-  weakSub <- makeWeak sub Nothing
-  modifyRef (nodeSubs node) (weakSub :)
-  return weakSub
+subscribe node sub = liftIO $ modifyM (nodeHub node) (insertHub sub)
 
 {-# INLINE subscribe_ #-}
 subscribe_ :: MonadIORef m => Node a -> Subscription a -> m ()
-subscribe_ node = void . subscribe node
+subscribe_ node sub = liftIO $ modifyM_ (nodeHub node) (insertHub_ sub)
 
 
 {-# INLINE createNode #-}
@@ -748,12 +785,12 @@ makeRoot k (Root nodes subscr) = liftIO $ lookupFan nodes k $ do
 
 {-# INLINE traverseWeakSubs #-}
 traverseWeakSubs :: MonadIORef m => (Subscription a -> m ()) -> [Weak (Subscription a)] -> m [Weak (Subscription a)]
-traverseWeakSubs f subs = do
-  flip filterM subs $ \(!weak) -> do
+traverseWeakSubs f = foldlM acc [] where
+  acc subs (!weak) = do
     m <- liftIO (deRefWeak weak)
     case m of
-      Nothing  -> return False
-      Just sub -> True <$ f sub
+      Nothing  -> return subs
+      Just sub -> (weak : subs) <$ f sub
 
 
 -- Be careful to read the subscriber list atomically, in case the actions run on the subscriber
@@ -762,18 +799,30 @@ traverseWeakSubs f subs = do
 {-# INLINE traverseSubs #-}
 traverseSubs :: MonadIORef m =>  (Subscription a -> m ()) -> Node a -> m ()
 traverseSubs f node = do
-  subs  <- takeRef (nodeSubs node)
-  subs' <- traverseWeakSubs f subs
-  modifyRef (nodeSubs node) (++subs')
+  hub <- readRef (nodeHub node)
+  case hub of
+    Empty      -> return ()
+    Single sub -> f sub
+    Many subs  -> do
+      writeRef (nodeHub node) (Many [])
+      subs' <- traverseWeakSubs f subs
+      modifyRef (nodeHub node) (\(Many new) -> Many (new <> subs'))
 
 {-# INLINE forSubs #-}
 forSubs :: MonadIORef m =>  Node a -> (Subscription a -> m ()) -> m ()
 forSubs node f = traverseSubs f node
 
-{-# INLINE modifyM #-}
-modifyM :: MonadRef m => Ref m a -> (a -> m a) -> m ()
-modifyM ref f = readRef ref >>= f >>= writeRef ref
+{-# INLINE modifyM_ #-}
+modifyM_ :: MonadRef m => Ref m a -> (a -> m a) -> m ()
+modifyM_ ref f = readRef ref >>= f >>= writeRef ref
 
+
+
+{-# INLINE modifyM #-}
+modifyM :: MonadRef m => Ref m a -> (a -> m (a, b)) -> m b
+modifyM ref f = do
+  (a, b) <- readRef ref >>= f
+  b <$ writeRef ref a
 
 -- | Delayed operations
 delayMerge :: Merge k -> Height ->  EventM ()
@@ -886,12 +935,27 @@ propagateHeight newHeight node = do
   height <- readHeight node
   when (height < newHeight) $ do
     writeRef (nodeHeight node) newHeight
-    forSubs node $ \case
+    propagateHeight' node
+
+  where
+    {-# INLINE propagateHeight' #-}
+    propagateHeight' :: Node a -> IO ()
+    propagateHeight' node' = forSubs node' $ \case
       MergeSub m  _     -> propagateHeight (succ newHeight) (mergeNode m)
 
       -- Event only modifies the merge after the frame, does not contribute to height
       SwitchMergeSub _  -> return ()
-      sub -> traverseDest (propagateHeight newHeight) sub
+      HoldSub {}        -> return ()
+
+      -- Have a shared 'height' therefore it doesn't need checking
+      FanSub f    ->  traverseWeakNodes propagateHeight' (fanNodes f)
+      PushSub p   -> propagateHeight' (pushNode p)
+
+      SwitchSub s -> propagateHeight newHeight (switchNode s)
+      CoinInner c -> propagateHeight newHeight (coinNode c)
+      CoinOuter c -> propagateHeight newHeight (coinNode c)
+
+
 
 traverseDest :: MonadIORef m => (forall b. Node b -> m ()) -> Subscription a -> m ()
 traverseDest f (MergeSub  m _)     = f (mergeNode m)

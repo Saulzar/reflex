@@ -8,10 +8,8 @@ and laziness/strictness may differ.
 module Reflex.Pure where
 
 import Reflex.Class
-import Reflex.Dynamic
 import Data.Functor.Misc
 
-import Control.Monad
 import Data.MemoTrie
 import Data.Dependent.Map (DMap, GCompare)
 import qualified Data.Dependent.Map as DMap
