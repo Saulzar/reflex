@@ -5,6 +5,7 @@ module Reflex.Test.Micro (testCases) where
 import Reflex
 import Reflex.TestPlan
 
+import Control.Monad
 import Control.Applicative
 import Data.Char
 import Data.Monoid
@@ -37,6 +38,15 @@ testCases =
       b1 <- behavior1
       b2 <- behavior2
       return (id <$> pull $ liftA2 (<>) (sample b1) (sample b2))
+
+  , testB "pull-4" $ do
+    es <- planList ["a", "b", "c"]
+    e <- plan [(0, ())]
+
+    b <- hold (constant "") $
+      pushAlways (const $ hold "z" es) e
+
+    return (join b)
 
   , testE "tag-1" $ do
       b1 <- behavior1

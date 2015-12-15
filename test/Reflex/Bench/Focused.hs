@@ -14,6 +14,9 @@ import Data.Traversable
 import Data.Maybe
 import Data.Map (Map)
 import qualified Data.Map as Map
+import qualified Data.Dependent.Map as DMap
+
+import Data.Functor.Misc
 
 import Data.Tuple
 import Data.List
@@ -73,32 +76,48 @@ events n  = plan $ (\i -> (i, i)) <$> [1..n]
 fmapFan :: Reflex t => Word -> Event t Word -> [Event t Word]
 fmapFan n e = (\i -> (+i) <$> e) <$> [1..n]
 
+
+-- Make a fan using the value in the event converting it to a singleton Map
+-- use a fan of size n (key is the value mod n)
+fanMerge :: Reflex t => Word -> Event t Word -> Event t Word
+fanMerge n e =  leftmost $ s <$> [0..n - 1] where
+  s k = select f (Const2 k)
+  f = fan (toMap <$> e)
+  toMap k = DMap.singleton (Const2 $ k `mod` n) k
+
+-- Dumb version of the above using simple fmapMaybe to filter
+fmapFanMerge :: Reflex t => Word -> Event t Word -> Event t Word
+fmapFanMerge n e =  leftmost $ s <$> [0..n - 1] where
+  s k = flip fmapMaybe e $ \j -> if (k == j `mod` n)
+    then Just k
+    else Nothing
+
+
+
 -- Create an Event with a Map which is dense to size N
 denseMap :: TestPlan t m => Word -> m (Event t (Map Word Word))
 denseMap n = plan [(1, m)] where
   m = Map.fromList $ zip [1..n] [1..n]
 
+iter :: (a -> a) -> Word -> a -> a
+iter _ 0 a = a
+iter f n a = iter f (n - 1) (f a)
 
+iterM :: Monad m => (a -> m a) -> Word -> a -> m a
+iterM _ 0 a = return a
+iterM f n a = iterM f (n - 1) =<< f a
 
-fmapChain :: Reflex t => Word -> Event t Word -> (Event t Word)
-fmapChain 0 e = e
-fmapChain n e = fmapChain (n - 1) (fmap (+1) e)
-
+fmapChain :: (Functor f) => Word -> f Word -> f Word
+fmapChain = iter (fmap (+1))
 
 mapDynChain :: (Reflex t, MonadHold t m) => Word -> Dynamic t Word -> m (Dynamic t Word)
-mapDynChain 0 d = return d
-mapDynChain n d = mapDynChain (n - 1) =<< mapDyn (+1) d
-
-
+mapDynChain = iterM (mapDyn (+1))
 
 joinDynChain :: (Reflex t, MonadHold t m) => Word -> Dynamic t Word -> m (Dynamic t Word)
-joinDynChain 0 d = return d
-joinDynChain n d = joinDynChain (n - 1) =<< joinDyn <$> mapDyn (const d) d
+joinDynChain = iterM (\d -> joinDyn <$> mapDyn (const d) d)
 
 combineDynChain :: (Reflex t, MonadHold t m) => Word -> Dynamic t Word -> m (Dynamic t Word)
-combineDynChain 0 d = return d
-combineDynChain n d = combineDynChain (n - 1) =<< combineDyn (+) d d
-
+combineDynChain = iterM (\d -> combineDyn (+) d d)
 
 pingPong :: (Reflex t, MonadHold t m, MonadFix m) => Event t a -> Event t a -> m (Event t a)
 pingPong e1 e2 = do
@@ -116,32 +135,25 @@ switchFactors i e = do
 
 
 switchChain :: (Reflex t, MonadHold t m, MonadFix m) => Word -> Event t Word -> m (Event t Word)
-switchChain 0 e = return e
-switchChain i e = switchChain (i - 1) =<< pingPong e ((+1) <$> e)
+switchChain  = iterM (\e -> pingPong e ((+1) <$> e))
 
 
 switchChain2 :: (Reflex t, MonadHold t m, MonadFix m) => Word -> Event t Word -> m (Event t Word)
-switchChain2 0 e = return e
-switchChain2 i e = switchChain2 (i - 1) =<< pingPong e ((+1) <$> leftmost [e, e])
+switchChain2 = iterM (\e -> pingPong e ((+1) <$> leftmost [e, e]))
 
 switchPromptlyChain :: (Reflex t, MonadHold t m) => Word -> Event t Word -> m (Event t Word)
-switchPromptlyChain 0 e  = return e
-switchPromptlyChain i e = do
-    d <- holdDyn e (e <$ e)
-    switchPromptlyChain (i - 1) (switchPromptlyDyn d)
+switchPromptlyChain = iterM $ \e ->
+    switchPromptlyDyn <$> holdDyn e (e <$ e)
 
 
 coinChain :: Reflex t => Word -> Event t Word -> Event t Word
-coinChain 0 e = e
-coinChain n e = coinChain (n - 1) $ coincidence (e <$ e)
+coinChain = iter $ \e -> coincidence (e <$ e)
 
+fanMergeChain :: Reflex t => Word -> Word -> Event t Word -> Event t Word
+fanMergeChain width = iter $ fanMerge width
 
-pullChain :: Reflex t => Word -> Behavior t Word -> Behavior t Word
-pullChain 0 b = b
-pullChain n b = pullChain (n - 1) $ (+1) <$> b
-
-
-
+fmapFanMergeChain :: Reflex t => Word -> Word -> Event t Word -> Event t Word
+fmapFanMergeChain width = iter $ fmapFanMerge width
 
 -- | Data type for a collection (a map) which is updated by providing differences
 data UpdatedMap t k a = UpdatedMap (Map k a) (Event t (Map k (Maybe a)))
@@ -258,6 +270,25 @@ merging n =
 
 
 
+fans :: Word -> [(String, TestCase)]
+fans n =
+  [  testE "fanMapChain"               $ fanMergeChain n 10 <$> e
+  ,  testE "fmapFanMapChain"           $ fmapFanMergeChain n 10 <$> e
+
+  , testE "fanMerge " $ fanMerge n <$> events n
+
+  , testE "fmapFanMerge " $ fmapFanMerge n <$> events n
+  , testE "triggerMerge" $ leftmost <$> forM [1..n] (\i -> plan [(i, i)])
+
+  ]
+  where
+
+    e :: TestPlan t m => m (Event t Word)
+    e = events 100
+
+
+
+
 dynamics :: Word -> [(String, TestCase)]
 dynamics n =
   [ testE "mapDynChain"         $ fmap updated $ mapDynChain n =<< d
@@ -294,13 +325,14 @@ firing n =
       counts <- counters
       return $ pull $ sum <$> traverse sample counts
 
-  , testB "pullChain"                 $ pullChain n . current <$> (count =<< events 4)
+  , testB "pullChain"                 $ fmapChain n . current <$> (count =<< events 4)
   , testB "pullChain2"                $ do
-    e' <- events 4
-    b <- hold (constant 0) $ leftmost
-      [ constant 0 <$ ffilter (==4) e'
-      , pushAlways (const $ pullChain n <$> hold 0 e') e'
-      ]
+    es <- events 4
+    e <- plan [(0, ())]
+
+    b <- hold (constant 0) $
+      pushAlways (const $ fmapChain n <$> hold 0 es) e
+
     return (join b)
   , testB "counters/pullTree" $ mergeTree 8 <$> counters
 

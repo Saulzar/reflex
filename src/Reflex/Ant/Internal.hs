@@ -694,21 +694,24 @@ makeFan :: GCompare k => NodeRef (DMap k) -> EventM (Fan k)
 makeFan ref = do
   parent <- readNodeRef ref
   rec
-    let sub = FanSub fan'
-    fan' <- Fan parent sub <$> newRef DMap.empty
+    let sub = FanSub f
+    f <- Fan parent sub <$> newRef DMap.empty
 
   subscribe_ parent sub
-  return fan'
+  return f
 
+{-# INLINE lookupWeakNode #-}
 lookupWeakNode :: GCompare k =>  DMap (WrapArg WeakNode k) -> k a -> IO (Maybe (Node a))
-lookupWeakNode nodes k = case DMap.lookup (WrapArg k) nodes of
+lookupWeakNode nodes !k = case DMap.lookup (WrapArg k) nodes of
   Nothing              -> return Nothing
   Just (WeakNode node) -> deRefWeak node
 
+
+{-# INLINE traverseWeakNode #-}
 traverseWeakNode :: (MonadIORef m) => (Node a -> m ()) -> WeakNode a -> m ()
 traverseWeakNode f (WeakNode node) = liftIO (deRefWeak node) >>= traverse_ f
 
-
+{-# INLINE traverseWeakNodes #-}
 traverseWeakNodes :: forall m k. (MonadIORef m) => (forall a. Node a -> m ()) -> IORef (DMap (WrapArg WeakNode k)) -> m ()
 traverseWeakNodes f nodesRef = do
   nodes <- readRef nodesRef
@@ -718,6 +721,7 @@ traverseWeakNodes f nodesRef = do
     traverseNode' :: DSum (WrapArg WeakNode k) -> m ()
     traverseNode' (WrapArg _ :=> node) = traverseWeakNode f node
 
+{-# INLINE traverseNode #-}
 traverseNode :: (GCompare k, MonadIORef m) => DMap (WrapArg WeakNode k) -> k a -> (Node a -> m ()) -> m ()
 traverseNode nodes k f = traverse_ (traverseWeakNode f) (DMap.lookup (WrapArg k) nodes)
 
@@ -725,7 +729,7 @@ traverseNode nodes k f = traverse_ (traverseWeakNode f) (DMap.lookup (WrapArg k)
 -- Check that the key is still valid (otherwise remove it)
 -- Runs as a finalizer for fan nodes
 cleanKey :: GCompare k => IORef (DMap (WrapArg WeakNode k)) -> k a -> IO ()
-cleanKey nodesRef k = do
+cleanKey nodesRef !k = do
   nodes <- readRef nodesRef
   for_ (DMap.lookup (WrapArg k) nodes) $ \(WeakNode node) -> do
     m <- deRefWeak node
@@ -753,7 +757,7 @@ makeFanNode fanRef k = do
     height <- readHeight (fanParent f)
 
     node <- newNode height (NodeFan f k)
-    weak <- makeWeak node Nothing
+    weak <- makeWeak node (Just $ cleanKey (fanNodes f) k)
 
     readNode (fanParent f) >>= traverse_ (writeOcc node)
     return (node, weak)
@@ -791,6 +795,7 @@ makeRoot k (Root nodes subscr) = liftIO $ lookupFan nodes k $ do
 
   return (node, weak)
 
+{-# INLINE traverseWeakSubs #-}
 traverseWeakSubs :: MonadIORef m => (Subscription a -> m ()) -> [Weak (Subscription a)] -> m [Weak (Subscription a)]
 traverseWeakSubs f = foldlM acc [] where
   acc subs !weak = do
@@ -814,6 +819,7 @@ traverseSubs f node = do
       subs' <- traverseWeakSubs f subs
       modifyRef (nodeHub node) (\(Many new) -> Many (new <> subs'))
 
+
 {-# INLINE forSubs #-}
 forSubs :: MonadIORef m =>  Node a -> (Subscription a -> m ()) -> m ()
 forSubs node f = traverseSubs f node
@@ -821,7 +827,6 @@ forSubs node f = traverseSubs f node
 {-# INLINE modifyM_ #-}
 modifyM_ :: MonadRef m => Ref m a -> (a -> m a) -> m ()
 modifyM_ ref f = readRef ref >>= f >>= writeRef ref
-
 
 
 {-# INLINE modifyM #-}
@@ -950,7 +955,7 @@ propagateHeight newHeight node = do
     propagateHeight' node' = forSubs node' $ \case
       MergeSub m  _     -> propagateHeight (succ newHeight) (mergeNode m)
 
-      -- Event only modifies the merge after the frame, does not contribute to height
+      -- Event only triggers after the frame, does not contribute to height
       SwitchMergeSub _  -> return ()
       HoldSub {}        -> return ()
 

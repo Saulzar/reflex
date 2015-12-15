@@ -67,13 +67,14 @@ main = defaultMain
   ]
 
 benchImpl :: (MonadReflexHost' t m, MonadSample t m) => String -> (forall a. m a -> IO a) -> Benchmark
-benchImpl name runHost = bgroup name  [sub 100 40, dynamics 100, dynamics 1000, firing 1000,  firing 10000, merging 10, merging 50, merging 100, merging 200]
+benchImpl name runHost = bgroup name  [sub 100 40, dynamics 100, dynamics 1000, firing 1000,  firing 10000, fans 10, fans 100, fans 1000, merging 10, merging 50, merging 100, merging 200]
   where
     sub n frames = runGroup ("subscribing " ++ show (n, frames)) $ Focused.subscribing n frames
     firing n     = runGroup ("firing "    ++ show n) $ Focused.firing n
     merging n    = runGroup ("merging "   ++ show n) $ Focused.merging n
     dynamics n   = runGroup ("dynamics "  ++ show n) $ Focused.dynamics n
 
+    fans n   = runGroup ("fans "  ++ show n) $ Focused.fans n
     runGroup name' benchmarks = bgroup name' (benchFiring runHost <$> benchmarks)
 
 
