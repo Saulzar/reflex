@@ -126,7 +126,6 @@ pingPong e1 e2 = do
     let e = switch (fst <$> current d)
   return e
 
-
 switchFactors :: (Reflex t, MonadHold t m) => Word -> Event t Word -> m (Event t Word)
 switchFactors 0 e = return e
 switchFactors i e = do
@@ -162,15 +161,12 @@ data UpdatedMap t k a = UpdatedMap (Map k a) (Event t (Map k (Maybe a)))
 switchMergeEvents ::  (MonadFix m, MonadHold t m, Reflex t, Ord k) =>  UpdatedMap t k (Event t a)  -> m (Event t (Map k a))
 switchMergeEvents mapChanges = switch . fmap mergeMap  <$> holdMap mapChanges
 
-
 switchMergeMaybe :: (MonadFix m, MonadHold t m, Reflex t, Ord k) =>  UpdatedMap t k (Event t a)  -> m (Event t (Map k a))
 switchMergeMaybe (UpdatedMap initial changes) = switchMergeMap initial (fmap (fromMaybe never) <$> changes)
-
 
 switchMergeBehaviors  :: forall a t m k. (MonadFix m, MonadHold t m, Reflex t, Ord k) =>  UpdatedMap t k (Behavior t a)  -> m (Behavior t (Map k a))
 switchMergeBehaviors mapChanges = pull <$> joinMap <$> holdMap mapChanges
   where joinMap m = traverse sample =<< sample m
-
 
 -- | Turn an UpdatedMap into a Dynamic by applying the differences to the initial value
 holdMapDyn :: (Reflex t, MonadHold t m, MonadFix m, Ord k) => UpdatedMap t k a -> m (Dynamic t (Map k a))
@@ -212,7 +208,6 @@ modifyMerge xs = do
 countMany :: (Reflex t, MonadHold t m, MonadFix m) => [Event t a] -> m [Behavior t Int]
 countMany = traverse (fmap current . count)
 
-
 countManyDyn :: (Reflex t, MonadHold t m, MonadFix m) => [Event t a] -> m [Dynamic t Int]
 countManyDyn = traverse count
 
@@ -227,19 +222,25 @@ switches numFrames f = do
     where
       makeEvents es =  pushAlways (\n -> f (fmap (+n) es)) es
 
+
+
 -- Two sets of benchmarks, one which we're interested in testing subscribe time (as well as time to fire frames)
 -- the other, which we're only interested in time for running frames
 subscribing :: Word -> Word -> [(String, TestCase)]
 subscribing n frames =
-  [ testE "fmapFan merge"       $ switches frames (return . mergeList . fmapFan n)
-  , testE "fmapFan/mergeTree" $ switches frames (return . mergeTree 8 . fmapFan n)
-  , testE "fmapChain"           $ switches frames (return . fmapChain n)
-  , testE "switchChain"         $ switches frames (switchChain n)
-  , testE "switchPromptlyChain" $ switches frames (switchPromptlyChain n)
-  , testE "switchFactors"       $ switches frames (switchFactors n)
-  , testE "coincidenceChain"    $ switches frames (return . coinChain n)
+  [ testSub "fmapFanMerge"        $ return . mergeList . fmapFan n
+  , testSub "fanMerge"            $ return . fanMerge n
+  , testSub "fmapFan/mergeTree"   $ return . mergeTree 8 . fmapFan n
+  , testSub "fmapChain"           $ return . fmapChain n
+  , testSub "switchChain"         $ switchChain n
+  , testSub "switchPromptlyChain" $ switchPromptlyChain n
+  , testSub "switchFactors"       $ switchFactors n
+  , testSub "coincidenceChain"    $ return . coinChain n
   ]
 
+  where
+    testSub :: (Eq a, Show a) => String -> (forall t n. (Reflex t, MonadHold t n, MonadFix n) => Event t Word -> n (Event t a)) -> (String, TestCase)
+    testSub name test = testE name (switches frames test)
 
 -- Set of benchmark to test specifically merging dynamic collections
 -- a pattern which occurs frequently in reflex-dom collections

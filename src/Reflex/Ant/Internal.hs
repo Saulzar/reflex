@@ -795,7 +795,6 @@ makeRoot k (Root nodes subscr) = liftIO $ lookupFan nodes k $ do
 
   return (node, weak)
 
-{-# INLINE traverseWeakSubs #-}
 traverseWeakSubs :: MonadIORef m => (Subscription a -> m ()) -> [Weak (Subscription a)] -> m [Weak (Subscription a)]
 traverseWeakSubs f = foldlM acc [] where
   acc subs !weak = do
@@ -909,17 +908,19 @@ askRef = asks >=> readRef
 askModifyRef :: (MonadReader r m, MonadRef m) => (r -> Ref m a) -> (a -> a) -> m ()
 askModifyRef g f = asks g >>= flip modifyRef f
 
-type InvalidateM a = StateT [Connect] IO a
 
 -- Write holds out and invalidate, return switches to connect!
 writeHolds :: [WriteHold] -> IO [Connect]
-writeHolds writes = execStateT (traverse_ writeHold writes) []
+writeHolds writes = do
+  connects <- newRef []
+  traverse_ (writeHold connects) writes
+  readRef connects
 
 {-# INLINE writeHold #-}
-writeHold :: WriteHold -> InvalidateM ()
-writeHold (WriteHold h value) = do
+writeHold :: IORef [Connect] -> WriteHold -> IO ()
+writeHold connects (WriteHold h value) = do
   writeRef (holdValue h) value
-  takeRef (holdInvs h) >>= invalidate
+  takeRef (holdInvs h) >>= invalidate connects
 
 {-# INLINE traverseWeak #-}
 traverseWeak :: MonadIO m => (a -> m ()) -> Weak a -> m ()
@@ -930,14 +931,14 @@ forWeak :: MonadIO m => Weak a -> (a -> m ()) -> m ()
 forWeak = flip traverseWeak
 
 
-invalidate :: [Invalidator] -> InvalidateM ()
-invalidate = traverse_  invalidate' where
+invalidate :: IORef [Connect] -> [Invalidator] -> IO ()
+invalidate connects = traverse_  invalidate' where
   invalidate' (PullInv wp) = forWeak wp $ \p -> do
     writeRef (pullValue p) Nothing
-    takeRef (pullInvs p) >>= invalidate
+    takeRef (pullInvs p) >>= invalidate connects
 
   invalidate' (SwitchInv ws) =
-    forWeak ws $ \s -> modify (Connect s:)
+    forWeak ws $ \s -> modifyRef connects (Connect s:)
 
 
 -- | Propagate changes in height from a coincidence or switch
@@ -1002,7 +1003,7 @@ initHolds = do
     traverse_ initHold newHolds
     initHolds
 
-
+{-# INLINE subscribeEvent #-}
 subscribeEvent :: Event a -> IO (EventHandle a)
 subscribeEvent e = evalEventM $ EventHandle <$> eventNode e
 
