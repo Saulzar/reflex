@@ -131,6 +131,8 @@ benchmarks = implGroup "spider" runSpiderHost cases
       , merging 50
       , merging 100
       , merging 200
+      , fans 50
+      , fans 200
       ]
 
 pattern RunTestCaseFlag = "--run-test-case"
