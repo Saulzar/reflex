@@ -17,8 +17,8 @@
 
 module Main where
 
-import Criterion.Main
-import Criterion.Types
+import Gauge.Main
+import Gauge
 
 import Reflex
 import Reflex.Host.Class
@@ -29,36 +29,30 @@ import Reflex.TestPlan
 import qualified Reflex.Bench.Focused as Focused
 import Reflex.Spider.Internal (SpiderEventHandle)
 
-import Control.Applicative
 import Control.DeepSeq (NFData (..))
 
 import Prelude
-import System.IO
 import System.Mem
 
-import Control.Arrow
+
+import Control.Arrow (first, second)
 import Control.Concurrent
-import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad
 import Control.Monad.Trans
 import Data.Bool
 import Data.Function
-import Data.Int
+
 import Data.IORef
-import Data.Monoid
+
 import Data.Time.Clock
-import Debug.Trace.LocationTH
-import GHC.Stats
+
 import System.Environment
 import System.Mem.Weak
 import System.Process
 import Text.Read
 
-import Unsafe.Coerce
 
-import Data.Map (Map)
-import qualified Data.Map as Map
 
 type MonadReflexHost' t m = (MonadReflexHost t m, MonadIORef m, MonadIORef (HostFrame t))
 
@@ -103,7 +97,7 @@ waitForFinalizers = do
   performGC
   x <- getCurrentTime
   isFinalized <- newIORef False
-  mkWeakPtr x $ Just $ writeIORef isFinalized True
+  void $ mkWeakPtr x $ Just $ writeIORef isFinalized True
   performGC
   fix $ \loop -> do
     f <- readIORef isFinalized
@@ -122,17 +116,18 @@ benchmarks = implGroup "spider" runSpiderHost cases
     merging n    = group ("merging "   <> show n) $ Focused.merging n
     dynamics n   = group ("dynamics "  <> show n) $ Focused.dynamics n
     cases = concat
-      [ sub 100 40
+      [ sub 10 20
       , dynamics 100
-      , dynamics 1000
+      , dynamics 500
+      , firing 200
       , firing 1000
-      , firing 10000
       , merging 10
       , merging 50
       , merging 100
       , merging 200
       ]
 
+pattern RunTestCaseFlag :: String
 pattern RunTestCaseFlag = "--run-test-case"
 
 spawnBenchmark :: String -> Benchmark
@@ -147,11 +142,12 @@ main = do
   args <- getArgs
   case args of
     RunTestCaseFlag : t -> case t of
-      [name, readMaybe -> Just count] -> do
+      [name, readMaybe -> Just c] -> do
         case lookup name benchmarks of
-          Just testCase -> testCase count
+          Just testCase -> testCase c
+          Nothing -> error $ "benchmark not found: " <> name
         performGC
         fix $ \loop -> bool (return ()) (yield >> loop) =<< myCapabilityHasOtherRunnableThreads
         return ()
-      _ -> $failure "--run-test-case: expected test name and iteration count to follow"
-    _ -> defaultMainWith (defaultConfig { timeLimit = 20, csvFile = Just "dmap-original.csv", reportFile = Just "report.html" }) $ fmap (spawnBenchmark . fst) benchmarks
+      _ -> error "--run-test-case: expected test name and iteration count to follow"
+    _ -> defaultMainWith (defaultConfig { csvFile = Just "dmap-original.csv", reportFile = Just "report.html" }) $ fmap (spawnBenchmark . fst) benchmarks

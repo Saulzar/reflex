@@ -14,7 +14,7 @@ import Control.DeepSeq
 import Control.Exception (evaluate)
 import Control.Monad.Identity
 import Control.Monad.IO.Class
-import Criterion.Main
+import Gauge.Main
 import Data.Dependent.Map (DMap)
 import qualified Data.Dependent.Map as DMap
 import Data.Dependent.Sum

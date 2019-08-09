@@ -71,11 +71,9 @@ occasional n period frames = traverse plan $ zipWith occs [1..] phases
     occs i phase = (, i) <$> [1, phase+1..frames]
 
 
-
 -- Event which never fires (but isn't 'never')
 never' :: TestPlan t m => m (Event t Word)
 never' = plan []
-
 
 -- Event which fires once on first frame
 event :: TestPlan t m => m (Event t Word)
@@ -252,11 +250,11 @@ switches numFrames f = do
 -- the other, which we're only interested in time for running frames
 subscribing :: Word -> Word -> [(String, TestCase)]
 subscribing n frames =
-  [ testSub "fmapFanMerge"        $ return . mergeList . fmapFan n
-  , testSub "fanMerge"            $ return . fanMerge n
-  , testSub "fmapFan/mergeTree"   $ return . mergeTree 8 . fmapFan n
-  , testSub "fmapChain"           $ return . fmapChain n
-  , testSub "switchChain"         $ switchChain n
+  [ testSub "fmapFanMerge"        $ return . mergeList . fmapFan (10 * n)
+  , testSub "fanMerge"            $ return . fanMerge (10 * n)
+  , testSub "fmapFan/mergeTree"   $ return . mergeTree 8 . fmapFan (10 * n)
+  , testSub "fmapChain"           $ return . fmapChain (10 * n)
+  , testSub "switchChain"         $ switchChain (n `div` 10)
   , testSub "switchPromptlyChain" $ switchPromptlyChain n
   , testSub "switchFactors"       $ switchFactors n
   , testSub "coincidenceChain"    $ return . coinChain n
@@ -316,7 +314,7 @@ fans n =
 
 dynamics :: Word -> [(String, TestCase)]
 dynamics n =
-  [ testE "mapDynChain"         $ fmap updated $ mapDynChain n =<< d
+  [ testE "mapDynChain"         $ fmap updated $ mapDynChain (n * 10) =<< d
   , testE "joinDynChain"        $ fmap updated $ joinDynChain n =<< d
   , testE "holdDynChain"        $ fmap updated $ holdDynChain n =<< d
   , testE "buildDynChain"        $ fmap updated $ buildDynChain n =<< d
@@ -341,7 +339,6 @@ firing n =
   , testE "switchPromptlyChain" $ switchPromptlyChain n =<< e
   , testE "switchFactors"       $  switchFactors n =<< e
   , testE "coincidenceChain"    $ coinChain n <$> e
-
   , testE "dense mergeTree"      $ mergeTree 8 <$> dense
   , testE "sparse mergeTree"  $ mergeTree 8 <$> sparse
 
@@ -352,9 +349,9 @@ firing n =
       counts <- counters
       return $ pull $ sum <$> traverse sample counts
 
-  , testB "pullChain"                 $ fmapChain n . current <$> (count =<< events 4)
+  , testB "pullChain"                 $ fmapChain n . current <$> (count =<< events 20)
   , testB "pullChain2"                $ do
-    es <- events 4
+    es <- events 20
     e' <- plan [(0, ())]
 
     b <- hold (constant 0) $
