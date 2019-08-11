@@ -25,6 +25,7 @@ module Reflex.Host.Class
   , newEventWithTriggerRef
   , fireEventRef
   , fireEventRefAndRead
+  , readEvent'
   ) where
 
 import Reflex.Class
@@ -181,11 +182,12 @@ fireEventRefAndRead mtRef input e = do
   case mt of
     Nothing -> return Nothing -- Since we aren't firing the input, the output can't fire
     Just trigger -> fireEventsAndRead [trigger :=> Identity input] $ do
-      mGetValue <- readEvent e
-      case mGetValue of
-        Nothing -> return Nothing
-        Just getValue -> fmap Just getValue
+      readEvent' e
+      
 
+-- | Simpler form of readEvent for more common use case.
+readEvent' :: MonadReadEvent t m => EventHandle t a -> m (Maybe a)
+readEvent' = readEvent >=> sequence
 
 --------------------------------------------------------------------------------
 -- Instances

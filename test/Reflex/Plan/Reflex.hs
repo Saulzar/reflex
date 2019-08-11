@@ -20,7 +20,6 @@ module Reflex.Plan.Reflex
   , readSchedule
   , readSchedule_
   , testSchedule
-  , readEvent'
   , makeDense
 
   , runTestE
@@ -115,9 +114,6 @@ triggerFrame :: (MonadReflexHost t m, MonadIORef m, NFData a) => ReadPhase m a -
 triggerFrame readResult _ occs =  do
     triggers <- catMaybes <$> traverse firingTrigger occs
     liftIO . evaluate . force =<< fireEventsAndRead triggers readResult
-
-readEvent' :: MonadReadEvent t m => EventHandle t a -> m (Maybe a)
-readEvent' = readEvent >=> sequenceA
 
 
 -- Convenience functions for running tests producing Events/Behaviors
