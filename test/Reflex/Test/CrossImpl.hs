@@ -30,7 +30,6 @@ import Data.Foldable
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.Monoid
 import Data.Traversable
 import System.Exit
 import System.Mem
@@ -51,11 +50,11 @@ relevantTestingTimes (b, e) = case Set.minView &&& Set.maxView $ Map.keysSet b `
   _ -> [] -- Doesn't actually make much sense
 
 type PureReflexDomain = P.Pure Int
-type TimeM = (->) Int
+type TimeM = PushM PureReflexDomain
 
 testPure :: (t ~ PureReflexDomain, m ~ TimeM) => ((Behavior t a, Event t b) -> m (Behavior t c, Event t d)) -> (Map Int a, Map Int b) -> (Map Int c, Map Int d)
 testPure builder (b, e) =
-  let (P.Behavior b', P.Event e') = ($ 0) $ builder (mapToPureBehavior b, mapToPureEvent e)
+  let (P.Behavior b', P.Event e') = builder (mapToPureBehavior b, mapToPureEvent e) `P.runPushM` 0
       relevantTimes = relevantTestingTimes (b, e)
       e'' = Map.mapMaybe id $ Map.fromList $ map (id &&& e') relevantTimes
       b'' = Map.fromList $ map (id &&& b') relevantTimes
@@ -73,7 +72,8 @@ instance MapMSignals (Event t a) (Event t' a) t t' where
 instance (MapMSignals a a' t t', MapMSignals b b' t t') => MapMSignals (a, b) (a', b') t t' where
   mapMSignals fb fe (a, b) = liftM2 (,) (mapMSignals fb fe a) (mapMSignals fb fe b)
 
-testSpider :: (forall m t. TestCaseConstraint t m => (Behavior t a, Event t b) -> m (Behavior t c, Event t d)) -> (Map Int a, Map Int b) -> (Map Int c, Map Int d)
+testSpider :: (forall m t. TestCaseConstraint t m => (Behavior t a, Event t b) -> m (Behavior t c, Event t d)) 
+           -> (Map Int a, Map Int b) -> (Map Int c, Map Int d)
 testSpider builder (bMap, eMap) = unsafePerformIO $ S.runSpiderHost $ do
   (re, reTrigger) <- newEventWithTriggerRef
   (rb, rbTrigger) <- newEventWithTriggerRef
@@ -98,7 +98,9 @@ testSpider builder (bMap, eMap) = unsafePerformIO $ S.runSpiderHost $ do
 tracePerf :: Show a => a -> b -> b
 tracePerf = flip const
 
-testAgreement :: (Eq c, Eq d, Show c, Show d) => (forall m t. TestCaseConstraint t m => (Behavior t a, Event t b) -> m (Behavior t c, Event t d)) -> (Map Int a, Map Int b) -> IO Bool
+testAgreement :: (Eq c, Eq d, Show c, Show d) 
+              => (forall m t. TestCaseConstraint t m => (Behavior t a, Event t b) -> m (Behavior t c, Event t d)) 
+              -> (Map Int a, Map Int b) -> IO Bool
 testAgreement builder inputs = do
   let identityResult = testPure builder inputs
   tracePerf "---------" $ return ()

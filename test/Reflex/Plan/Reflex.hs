@@ -41,7 +41,7 @@ import Data.Dependent.Sum (DSum (..))
 import qualified Data.IntMap.Strict as IntMap
 import Data.Maybe
 import Data.Monoid
-import Data.Traversable (sequenceA, traverse)
+import Data.Traversable
 
 import Control.DeepSeq
 import Control.Exception

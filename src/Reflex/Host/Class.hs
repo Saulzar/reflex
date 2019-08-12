@@ -25,6 +25,7 @@ module Reflex.Host.Class
   , newEventWithTriggerRef
   , fireEventRef
   , fireEventRefAndRead
+  , readEvent'
   ) where
 
 import Reflex.Class

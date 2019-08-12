@@ -6,6 +6,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE UndecidableInstances #-}
 #ifdef USE_REFLEX_OPTIMIZER
 {-# OPTIONS_GHC -fplugin=Reflex.Optimizer #-}
@@ -99,6 +100,20 @@ instance Adjustable t m => Adjustable t (ReaderT r m) where
   traverseDMapWithKeyWithAdjustWithMove f dm0 dm' = do
     r <- ask
     lift $ traverseDMapWithKeyWithAdjustWithMove (\k v -> runReaderT (f k v) r) dm0 dm'
+
+{-# INLINE adjustPush #-}
+adjustPush :: (Reflex t) => (a -> PushM t a') -> (b -> PushM t b') -> a -> Event t b -> PushM t (a', Event t b')
+adjustPush f0 f' m0 m' = (, pushAlways f' m') <$> f0 m0
+
+instance (Reflex t, Monad (PushM t)) => Adjustable t (PushM t) where
+  {-# INLINABLE runWithReplace #-}
+  runWithReplace = adjustPush id id
+  {-# INLINABLE traverseIntMapWithKeyWithAdjust #-}
+  traverseIntMapWithKeyWithAdjust f  = adjustPush (IntMap.traverseWithKey f) (traverseIntMapPatchWithKey f)  
+  {-# INLINABLE traverseDMapWithKeyWithAdjust #-}
+  traverseDMapWithKeyWithAdjust f    = adjustPush (DMap.traverseWithKey f) (traversePatchDMapWithKey f) 
+  {-# INLINABLE traverseDMapWithKeyWithAdjustWithMove #-}
+  traverseDMapWithKeyWithAdjustWithMove f  = adjustPush (DMap.traverseWithKey f) (traversePatchDMapWithMoveWithKey f)  
 
 -- | Traverse a 'DMap' of 'Adjustable' actions, running each of them. The provided 'Event' of patches
 -- to the 'DMap' can add, remove, or update values.

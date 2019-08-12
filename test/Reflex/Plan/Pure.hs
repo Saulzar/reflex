@@ -29,7 +29,7 @@ import Prelude
 mapToPureEvent :: IntMap a -> Event (Pure Int) a
 mapToPureEvent m = Event $ flip IntMap.lookup m
 
-type TimeM = (->) Int
+type TimeM = PushM (Pure Int)
 newtype PurePlan a = PurePlan { unPlan :: StateT IntSet TimeM a } deriving (Functor, Applicative, Monad, MonadFix)
 
 liftPlan :: TimeM a -> PurePlan a
@@ -41,6 +41,7 @@ instance MonadHold (Pure Int) PurePlan where
   holdIncremental initial = liftPlan . holdIncremental initial
   buildDynamic getInitial = liftPlan . buildDynamic getInitial
   headE = liftPlan . headE
+  liftPushM = liftPlan . liftPushM
 
 instance MonadSample (Pure Int) PurePlan where
   sample = liftPlan . sample
@@ -53,7 +54,7 @@ instance TestPlan (Pure Int) PurePlan where
       where m = IntMap.fromList (first fromIntegral <$> occs)
 
 runPure :: PurePlan a -> (a, IntSet)
-runPure (PurePlan p) = runStateT p mempty $ 0
+runPure (PurePlan p) = runStateT p mempty `runPushM` 0
 
 relevantTimes :: IntSet -> IntSet
 relevantTimes occs = IntSet.fromList [0..l + 1]

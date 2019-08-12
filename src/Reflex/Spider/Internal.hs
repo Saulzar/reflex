@@ -2329,11 +2329,11 @@ instance Reflex.Class.MonadSample (SpiderTimeline x) (SpiderPullM x) where
   {-# INLINABLE sample #-}
   sample = coerce . readBehaviorTracked . unSpiderBehavior
 
-instance HasSpiderTimeline x => Reflex.Class.MonadSample (SpiderTimeline x) (SpiderPushM x) where
+instance HasSpiderTimeline x => Reflex.Class.MonadSample (SpiderTimeline x) (R.PushM (SpiderTimeline x)) where
   {-# INLINABLE sample #-}
   sample (SpiderBehavior b) = SpiderPushM $ readBehaviorUntracked b
 
-instance HasSpiderTimeline x => Reflex.Class.MonadHold (SpiderTimeline x) (SpiderPushM x) where
+instance HasSpiderTimeline x => Reflex.Class.MonadHold (SpiderTimeline x) (R.PushM (SpiderTimeline x)) where
   {-# INLINABLE hold #-}
   hold v0 e = Reflex.Class.current <$> Reflex.Class.holdDyn v0 e
   {-# INLINABLE holdDyn #-}
@@ -2394,7 +2394,7 @@ holdIncrementalSpiderEventM :: (HasSpiderTimeline x, Patch p) => PatchTarget p -
 holdIncrementalSpiderEventM v0 e = fmap (SpiderIncremental . dynamicHold) $ Reflex.Spider.Internal.hold v0 $ unSpiderEvent e
 
 buildDynamicSpiderEventM :: HasSpiderTimeline x 
-                         => SpiderPushM x a -> Reflex.Class.Event (SpiderTimeline x) a 
+                         => R.PushM (SpiderTimeline x) a -> Reflex.Class.Event (SpiderTimeline x) a 
                          -> EventM x (Reflex.Class.Dynamic (SpiderTimeline x) a)
 buildDynamicSpiderEventM getV0 e = fmap (SpiderDynamic . dynamicDynIdentity) $ 
   Reflex.Spider.Internal.buildDynamic (coerce getV0) $ coerce $ unSpiderEvent e
@@ -2554,7 +2554,6 @@ newtype SpiderPullM (x :: Type) a = SpiderPullM (BehaviorM x a) deriving (Functo
 
 type ComputeM = EventM
 
-newtype SpiderPushM (x :: Type) a = PushM (SpiderTimeline x)
 
 instance HasSpiderTimeline x => R.Reflex (SpiderTimeline x) where
   {-# SPECIALIZE instance R.Reflex (SpiderTimeline Global) #-}
@@ -2563,6 +2562,7 @@ instance HasSpiderTimeline x => R.Reflex (SpiderTimeline x) where
   newtype Dynamic (SpiderTimeline x) a = SpiderDynamic { unSpiderDynamic :: DynamicS x (Identity a) } -- deriving (Functor, Applicative, Monad)
   newtype Incremental (SpiderTimeline x) p = SpiderIncremental { unSpiderIncremental :: DynamicS x p }
   type PullM (SpiderTimeline x) = SpiderPullM x
+  
   newtype PushM (SpiderTimeline x) a = SpiderPushM (ComputeM x a)
     deriving (Functor, Applicative, Monad, MonadIO, MonadFix)
 

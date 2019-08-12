@@ -31,6 +31,7 @@ module Reflex.Pure
   , Event (..)
   , Dynamic (..)
   , Incremental (..)
+  , runPushM
   ) where
 
 import Control.Monad
@@ -60,7 +61,7 @@ instance (Enum t, HasTrie t, Ord t) => Reflex (Pure t) where
   newtype Dynamic (Pure t) a = Dynamic { unDynamic :: t -> (a, Maybe a) }
   newtype Incremental (Pure t) p = Incremental { unIncremental :: t -> (PatchTarget p, Maybe p) }
 
-  newtype PushM (Pure t) a = PushM { unPushM :: t -> a } 
+  newtype PushM (Pure t) a = PurePushM { runPushM :: t -> a } 
     deriving (Functor, Applicative, Monad, MonadFix, MonadSample (Pure t))
   type PullM (Pure t) = (->) t
 
@@ -71,7 +72,7 @@ instance (Enum t, HasTrie t, Ord t) => Reflex (Pure t) where
   constant x = Behavior $ \_ -> x
 
   push :: (a -> PushM (Pure t) (Maybe b)) -> Event (Pure t) a -> Event (Pure t) b
-  push f e = Event $ memo $ \t -> unEvent e t >>= \o -> unPushM (f o) t
+  push f e = Event $ memo $ \t -> unEvent e t >>= \o -> f o `runPushM` t
 
   pushCheap :: (a -> PushM (Pure t) (Maybe b)) -> Event (Pure t) a -> Event (Pure t) b
   pushCheap = push
@@ -182,7 +183,7 @@ instance MonadSample (Pure t) ((->) t) where
 instance (Enum t, HasTrie t, Ord t) => MonadHold (Pure t) (PushM (Pure t)) where
 
   hold :: a -> Event (Pure t) a -> PushM (Pure t) (Behavior (Pure t) a)
-  hold initialValue e  = PushM hold' where
+  hold initialValue e  = PurePushM hold' where
     hold' initialTime = Behavior f where 
       f = memo $ \sampleTime ->
             -- Really, the sampleTime should never be prior to the initialTime,
@@ -197,13 +198,13 @@ instance (Enum t, HasTrie t, Ord t) => MonadHold (Pure t) (PushM (Pure t)) where
 
   liftPushM = id
 
-  buildDynamic :: (PushM (Pure t) a) -> Event (Pure t) a -> PushM (Pure t) (Dynamic (Pure t) a)
-  buildDynamic (PushM buildInitial) e = PushM $ \initialTime ->
-    let Behavior f =  hold (buildInitial initialTime) e `unPushM` initialTime
+  buildDynamic :: PushM (Pure t) a -> Event (Pure t) a -> PushM (Pure t) (Dynamic (Pure t) a)
+  buildDynamic (PurePushM buildInitial) e = PurePushM $ \initialTime ->
+    let Behavior f =  hold (buildInitial initialTime) e `runPushM` initialTime
     in Dynamic $ \t -> (f t, unEvent e t)
 
   holdIncremental :: Patch p => PatchTarget p -> Event (Pure t) p -> PushM (Pure t) (Incremental (Pure t) p)
-  holdIncremental initialValue e = PushM hold' where 
+  holdIncremental initialValue e = PurePushM hold' where 
     hold' initialTime = Incremental $ \t -> (f t, unEvent e t) where 
       f = memo $ \sampleTime ->
             -- Really, the sampleTime should never be prior to the initialTime,

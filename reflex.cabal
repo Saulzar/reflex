@@ -394,6 +394,8 @@ benchmark saulzar-bench
     Reflex.TestPlan
     Reflex.Plan.Reflex
     Reflex.Bench.Focused
+    Reflex.Bench.Adjustable
+
 
 source-repository head
   type: git

@@ -229,6 +229,7 @@ import Debug.Trace (trace)
 class ( MonadHold t (PushM t)
       , MonadSample t (PullM t)
       , MonadFix (PushM t)
+      , Monad (PushM t)
       , Functor (Dynamic t)
       , Applicative (Dynamic t) -- Necessary for GHC <= 7.8
       , Monad (Dynamic t)
