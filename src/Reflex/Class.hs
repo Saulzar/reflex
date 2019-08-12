@@ -251,7 +251,7 @@ class ( MonadHold t (PushM t)
   -- changes to large values.
   data Incremental t :: * -> *
   -- | A monad for doing complex push-based calculations efficiently
-  type PushM t :: * -> *
+  data PushM t :: * -> *
   -- | A monad for doing complex pull-based calculations efficiently
   type PullM t :: * -> *
   -- | An 'Event' with no occurrences
@@ -415,6 +415,11 @@ class MonadSample t m => MonadHold t m where
   -- | Create a new 'Event' that only occurs only once, on the first occurrence of
   -- the supplied 'Event'.
   headE :: Event t a -> m (Event t a)
+
+  -- | Run a PushM computation (the most basic MonadHold)
+  liftPushM :: PushM t a -> m a
+  default liftPushM :: (m ~ f m', MonadTrans f, MonadHold t m') => PushM t a -> m a
+  liftPushM = lift . liftPushM
 
 -- | Accumulate an 'Incremental' with the supplied initial value and the firings of the provided 'Event',
 -- using the combining function to produce a patch.

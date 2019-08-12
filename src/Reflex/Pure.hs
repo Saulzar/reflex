@@ -7,6 +7,8 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
 
 #ifdef USE_REFLEX_OPTIMIZER
 {-# OPTIONS_GHC -fplugin=Reflex.Optimizer #-}
@@ -32,6 +34,7 @@ module Reflex.Pure
   ) where
 
 import Control.Monad
+import Control.Monad.Fix
 import Data.Dependent.Map (DMap, GCompare)
 import qualified Data.Dependent.Map as DMap
 import Data.IntMap (IntMap)
@@ -57,7 +60,8 @@ instance (Enum t, HasTrie t, Ord t) => Reflex (Pure t) where
   newtype Dynamic (Pure t) a = Dynamic { unDynamic :: t -> (a, Maybe a) }
   newtype Incremental (Pure t) p = Incremental { unIncremental :: t -> (PatchTarget p, Maybe p) }
 
-  type PushM (Pure t) = (->) t
+  newtype PushM (Pure t) a = PushM { unPushM :: t -> a } 
+    deriving (Functor, Applicative, Monad, MonadFix, MonadSample (Pure t))
   type PullM (Pure t) = (->) t
 
   never :: Event (Pure t) a
@@ -67,7 +71,7 @@ instance (Enum t, HasTrie t, Ord t) => Reflex (Pure t) where
   constant x = Behavior $ \_ -> x
 
   push :: (a -> PushM (Pure t) (Maybe b)) -> Event (Pure t) a -> Event (Pure t) b
-  push f e = Event $ memo $ \t -> unEvent e t >>= \o -> f o t
+  push f e = Event $ memo $ \t -> unEvent e t >>= \o -> unPushM (f o) t
 
   pushCheap :: (a -> PushM (Pure t) (Maybe b)) -> Event (Pure t) a -> Event (Pure t) b
   pushCheap = push
@@ -171,15 +175,16 @@ instance Monad (Dynamic (Pure t)) where
     in (cur, getFirst $ mconcat $ map First [updBoth, updOuter, updInner])
 
 instance MonadSample (Pure t) ((->) t) where
-
   sample :: Behavior (Pure t) a -> (t -> a)
   sample = unBehavior
 
-instance (Enum t, HasTrie t, Ord t) => MonadHold (Pure t) ((->) t) where
+  
+instance (Enum t, HasTrie t, Ord t) => MonadHold (Pure t) (PushM (Pure t)) where
 
-  hold :: a -> Event (Pure t) a -> t -> Behavior (Pure t) a
-  hold initialValue e initialTime = Behavior f
-    where f = memo $ \sampleTime ->
+  hold :: a -> Event (Pure t) a -> PushM (Pure t) (Behavior (Pure t) a)
+  hold initialValue e  = PushM hold' where
+    hold' initialTime = Behavior f where 
+      f = memo $ \sampleTime ->
             -- Really, the sampleTime should never be prior to the initialTime,
             -- because that would mean the Behavior is being sampled before
             -- being created.
@@ -190,14 +195,17 @@ instance (Enum t, HasTrie t, Ord t) => MonadHold (Pure t) ((->) t) where
 
   holdDyn v0 = buildDynamic (return v0)
 
-  buildDynamic :: (t -> a) -> Event (Pure t) a -> t -> Dynamic (Pure t) a
-  buildDynamic initialValue e initialTime =
-    let Behavior f = hold (initialValue initialTime) e initialTime
+  liftPushM = id
+
+  buildDynamic :: (PushM (Pure t) a) -> Event (Pure t) a -> PushM (Pure t) (Dynamic (Pure t) a)
+  buildDynamic (PushM buildInitial) e = PushM $ \initialTime ->
+    let Behavior f =  hold (buildInitial initialTime) e `unPushM` initialTime
     in Dynamic $ \t -> (f t, unEvent e t)
 
-  holdIncremental :: Patch p => PatchTarget p -> Event (Pure t) p -> t -> Incremental (Pure t) p
-  holdIncremental initialValue e initialTime = Incremental $ \t -> (f t, unEvent e t)
-    where f = memo $ \sampleTime ->
+  holdIncremental :: Patch p => PatchTarget p -> Event (Pure t) p -> PushM (Pure t) (Incremental (Pure t) p)
+  holdIncremental initialValue e = PushM hold' where 
+    hold' initialTime = Incremental $ \t -> (f t, unEvent e t) where 
+      f = memo $ \sampleTime ->
             -- Really, the sampleTime should never be prior to the initialTime,
             -- because that would mean the Behavior is being sampled before
             -- being created.

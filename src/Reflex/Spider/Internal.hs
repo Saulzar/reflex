@@ -2317,9 +2317,12 @@ instance HasSpiderTimeline x => Reflex.Class.MonadHold (SpiderTimeline x) (Event
   {-# INLINABLE holdIncremental #-}
   holdIncremental = holdIncrementalSpiderEventM
   {-# INLINABLE buildDynamic #-}
-  buildDynamic = buildDynamicSpiderEventM
+  buildDynamic = buildDynamicSpiderEventM 
   {-# INLINABLE headE #-}
   headE = R.slowHeadE
+  {-# INLINABLE liftPushM #-}
+  liftPushM = coerce
+
 --  headE (SpiderEvent e) = SpiderEvent <$> Reflex.Spider.Internal.headE e
 
 instance Reflex.Class.MonadSample (SpiderTimeline x) (SpiderPullM x) where
@@ -2341,7 +2344,8 @@ instance HasSpiderTimeline x => Reflex.Class.MonadHold (SpiderTimeline x) (Spide
   buildDynamic getV0 (SpiderEvent e) = SpiderPushM $ fmap (SpiderDynamic . dynamicDynIdentity) $ Reflex.Spider.Internal.buildDynamic (coerce getV0) $ coerce e
   {-# INLINABLE headE #-}
   headE = R.slowHeadE
---  headE (SpiderEvent e) = SpiderPushM $ SpiderEvent <$> Reflex.Spider.Internal.headE e
+  {-# INLINABLE liftPushM #-}
+  liftPushM = coerce
 
 instance HasSpiderTimeline x => Monad (Reflex.Class.Dynamic (SpiderTimeline x)) where
   {-# INLINE return #-}
@@ -2389,8 +2393,11 @@ holdDynSpiderEventM v0 e = fmap (SpiderDynamic . dynamicHoldIdentity) $ Reflex.S
 holdIncrementalSpiderEventM :: (HasSpiderTimeline x, Patch p) => PatchTarget p -> Reflex.Class.Event (SpiderTimeline x) p -> EventM x (Reflex.Class.Incremental (SpiderTimeline x) p)
 holdIncrementalSpiderEventM v0 e = fmap (SpiderIncremental . dynamicHold) $ Reflex.Spider.Internal.hold v0 $ unSpiderEvent e
 
-buildDynamicSpiderEventM :: HasSpiderTimeline x => SpiderPushM x a -> Reflex.Class.Event (SpiderTimeline x) a -> EventM x (Reflex.Class.Dynamic (SpiderTimeline x) a)
-buildDynamicSpiderEventM getV0 e = fmap (SpiderDynamic . dynamicDynIdentity) $ Reflex.Spider.Internal.buildDynamic (coerce getV0) $ coerce $ unSpiderEvent e
+buildDynamicSpiderEventM :: HasSpiderTimeline x 
+                         => SpiderPushM x a -> Reflex.Class.Event (SpiderTimeline x) a 
+                         -> EventM x (Reflex.Class.Dynamic (SpiderTimeline x) a)
+buildDynamicSpiderEventM getV0 e = fmap (SpiderDynamic . dynamicDynIdentity) $ 
+  Reflex.Spider.Internal.buildDynamic (coerce getV0) $ coerce $ unSpiderEvent e
 
 instance HasSpiderTimeline x => Reflex.Class.MonadHold (SpiderTimeline x) (SpiderHost x) where
   {-# INLINABLE hold #-}
@@ -2403,6 +2410,10 @@ instance HasSpiderTimeline x => Reflex.Class.MonadHold (SpiderTimeline x) (Spide
   buildDynamic getV0 e = runFrame . runSpiderHostFrame $ Reflex.Class.buildDynamic getV0 e
   {-# INLINABLE headE #-}
   headE e = runFrame . runSpiderHostFrame $ Reflex.Class.headE e
+  {-# INLINABLE liftPushM #-}
+  liftPushM = coerce
+
+
 
 instance HasSpiderTimeline x => Reflex.Class.MonadSample (SpiderTimeline x) (SpiderHostFrame x) where
   sample = SpiderHostFrame . readBehaviorUntracked . unSpiderBehavior --TODO: This can cause problems with laziness, so we should get rid of it if we can
@@ -2418,6 +2429,10 @@ instance HasSpiderTimeline x => Reflex.Class.MonadHold (SpiderTimeline x) (Spide
   buildDynamic getV0 e = SpiderHostFrame $ fmap (SpiderDynamic . dynamicDynIdentity) $ Reflex.Spider.Internal.buildDynamic (coerce getV0) $ coerce $ unSpiderEvent e
   {-# INLINABLE headE #-}
   headE = R.slowHeadE
+  {-# INLINABLE liftPushM #-}
+  liftPushM = coerce
+
+
 --  headE (SpiderEvent e) = SpiderHostFrame $ SpiderEvent <$> Reflex.Spider.Internal.headE e
 
 instance HasSpiderTimeline x => Reflex.Class.MonadSample (SpiderTimeline x) (SpiderHost x) where
@@ -2439,7 +2454,8 @@ instance HasSpiderTimeline x => Reflex.Class.MonadHold (SpiderTimeline x) (Refle
   buildDynamic getV0 e = Reflex.Spider.Internal.ReadPhase $ Reflex.Class.buildDynamic getV0 e
   {-# INLINABLE headE #-}
   headE e = Reflex.Spider.Internal.ReadPhase $ Reflex.Class.headE e
-
+  {-# INLINABLE liftPushM #-}
+  liftPushM = coerce
 --------------------------------------------------------------------------------
 -- Deprecated items
 --------------------------------------------------------------------------------
@@ -2538,7 +2554,7 @@ newtype SpiderPullM (x :: Type) a = SpiderPullM (BehaviorM x a) deriving (Functo
 
 type ComputeM = EventM
 
-newtype SpiderPushM (x :: Type) a = SpiderPushM (ComputeM x a) deriving (Functor, Applicative, Monad, MonadIO, MonadFix)
+newtype SpiderPushM (x :: Type) a = PushM (SpiderTimeline x)
 
 instance HasSpiderTimeline x => R.Reflex (SpiderTimeline x) where
   {-# SPECIALIZE instance R.Reflex (SpiderTimeline Global) #-}
@@ -2547,7 +2563,9 @@ instance HasSpiderTimeline x => R.Reflex (SpiderTimeline x) where
   newtype Dynamic (SpiderTimeline x) a = SpiderDynamic { unSpiderDynamic :: DynamicS x (Identity a) } -- deriving (Functor, Applicative, Monad)
   newtype Incremental (SpiderTimeline x) p = SpiderIncremental { unSpiderIncremental :: DynamicS x p }
   type PullM (SpiderTimeline x) = SpiderPullM x
-  type PushM (SpiderTimeline x) = SpiderPushM x
+  newtype PushM (SpiderTimeline x) a = SpiderPushM (ComputeM x a)
+    deriving (Functor, Applicative, Monad, MonadIO, MonadFix)
+
   {-# INLINABLE never #-}
   never = SpiderEvent eventNever
   {-# INLINABLE constant #-}

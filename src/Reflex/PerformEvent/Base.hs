@@ -164,6 +164,9 @@ instance (ReflexHost t, MonadHold t m) => MonadHold t (PerformEventT t m) where
   buildDynamic getV0 v' = PerformEventT $ lift $ buildDynamic getV0 v'
   {-# INLINABLE headE #-}
   headE = PerformEventT . lift . headE
+  {-# INLINABLE liftPushM #-}
+  liftPushM = PerformEventT . lift . liftPushM
+
 
 instance (MonadRef (HostFrame t), ReflexHost t) => MonadRef (PerformEventT t m) where
   type Ref (PerformEventT t m) = Ref (HostFrame t)

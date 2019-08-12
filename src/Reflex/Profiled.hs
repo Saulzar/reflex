@@ -128,7 +128,9 @@ instance Reflex t => Reflex (ProfiledTimeline t) where
   newtype Event (ProfiledTimeline t) a = Event_Profiled { unEvent_Profiled :: Event t a }
   newtype Dynamic (ProfiledTimeline t) a = Dynamic_Profiled { unDynamic_Profiled :: Dynamic t a }
   newtype Incremental (ProfiledTimeline t) p = Incremental_Profiled { unIncremental_Profiled :: Incremental t p }
-  type PushM (ProfiledTimeline t) = ProfiledM (PushM t)
+  newtype PushM (ProfiledTimeline t) a = ProfiledPushM {  unProfiledPushM :: ProfiledM (PushM t) a }
+    
+
   type PullM (ProfiledTimeline t) = ProfiledM (PullM t)
   never = Event_Profiled never
   constant = Behavior_Profiled . constant
@@ -167,12 +169,22 @@ deriving instance Functor (Dynamic t) => Functor (Dynamic (ProfiledTimeline t))
 deriving instance Applicative (Dynamic t) => Applicative (Dynamic (ProfiledTimeline t))
 deriving instance Monad (Dynamic t) => Monad (Dynamic (ProfiledTimeline t))
 
+deriving instance (MonadHold t (PushM t))   => MonadHold (ProfiledTimeline t) (PushM (ProfiledTimeline t))
+deriving instance (MonadSample t (PushM t)) => MonadSample (ProfiledTimeline t) (PushM (ProfiledTimeline t))
+
+deriving instance (Functor (PushM t))     => Functor (PushM (ProfiledTimeline t))
+deriving instance (Applicative (PushM t)) => Applicative (PushM (ProfiledTimeline t))
+deriving instance (Monad (PushM t))       => Monad (PushM (ProfiledTimeline t))
+deriving instance (MonadFix (PushM t))       => MonadFix (PushM (ProfiledTimeline t))
+
+
 instance MonadHold t m => MonadHold (ProfiledTimeline t) (ProfiledM m) where
   hold v0 (Event_Profiled v') = ProfiledM $ Behavior_Profiled <$> hold v0 v'
   holdDyn v0 (Event_Profiled v') = ProfiledM $ Dynamic_Profiled <$> holdDyn v0 v'
   holdIncremental v0 (Event_Profiled v') = ProfiledM $ Incremental_Profiled <$> holdIncremental v0 v'
-  buildDynamic (ProfiledM v0) (Event_Profiled v') = ProfiledM $ Dynamic_Profiled <$> buildDynamic v0 v'
+  buildDynamic v0 (Event_Profiled v') = ProfiledM $ Dynamic_Profiled <$> buildDynamic (coerce v0) v'
   headE (Event_Profiled e) = ProfiledM $ Event_Profiled <$> headE e
+  liftPushM  = ProfiledM . liftPushM . coerce
 
 instance MonadSample t m => MonadSample (ProfiledTimeline t) (ProfiledM m) where
   sample (Behavior_Profiled b) = ProfiledM $ sample b
