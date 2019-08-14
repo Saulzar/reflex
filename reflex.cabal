@@ -397,6 +397,33 @@ benchmark saulzar-bench
     Reflex.Bench.Adjustable
 
 
+benchmark adjustable-bench
+  type: exitcode-stdio-1.0
+  hs-source-dirs: bench test
+  c-sources: bench-cbits/checkCapability.c
+  main-is: RunAdjustable.hs
+  ghc-options: -Wall -O2 -rtsopts -threaded
+  build-depends:
+    base,
+    containers,
+    criterion,
+    deepseq,
+    dependent-map,
+    dependent-sum,
+    mtl,
+    primitive,
+    reflex,
+    time,
+    transformers,
+    these,
+    ref-tf
+
+  if flag(split-these)
+    build-depends: semialign
+
+  other-modules:
+    Reflex.Bench.Adjustable
+
 source-repository head
   type: git
   location: https://github.com/reflex-frp/reflex

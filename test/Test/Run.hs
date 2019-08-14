@@ -30,32 +30,39 @@ runApp :: (t ~ SpiderTimeline Global, m ~ SpiderHost Global)
   -> bIn
   -> [Maybe (These bIn eIn)]
   -> IO [[(bOut, Maybe eOut)]]
-runApp app b0 input = do 
-  runFrame <- setupApp setup
-  traverse runFrame input
+runApp app b0 inputFrames = do 
+  runFrame <- runSetup setupApp buildRead
+  traverse runFrame inputFrames 
   where 
-    setup input = do
+    setupApp input = do
       inputB <- hold b0 pulseB
-      (AppOut outB outE)  <- app $ AppIn inputB inputE
-      hnd <- PerformEventT . lift $ subscribeEvent outE
-      return $ liftA2 (,) (sample outB) (readEvent' hnd)
+      app $ AppIn inputB inputE
         where (pulseB, inputE) = fanThese input
 
-setupApp :: (t ~ SpiderTimeline Global, m ~ SpiderHost Global)
-       => (Event t a -> PerformEventT t m (ReadPhase m b))
+
+    buildRead (AppOut outB outE) = do
+        hnd <- subscribeEvent outE
+        return $ liftA2 (,) (sample outB) (readEvent' hnd)
+
+runSetup :: (t ~ SpiderTimeline Global, m ~ SpiderHost Global)
+       => (Event t a -> PerformEventT t m out)
+       -> (out -> m (ReadPhase m b))
        -> IO (Maybe a -> IO [b])
-setupApp app = runSpiderHost $ do
+runSetup app buildRead = runSpiderHost $ do
   (inputEvent, triggerRef) <- newEventWithTriggerRef
-  (readPhase, FireCommand fire) <- hostPerformEventT $ app inputEvent
+  (out, FireCommand fire) <- hostPerformEventT $ app inputEvent
+  readPhase <- buildRead out
+
   mTrigger <- readRef triggerRef
   return $ \mInput ->  runSpiderHost $
     fire (maybeTrigger mTrigger mInput) readPhase
-
   where
     maybeTrigger mTrigger = fromMaybe [] .
       liftA2 (\trigger a -> [trigger :=> Identity a]) mTrigger
 
-
+subscribeAndRead :: MonadReflexHost t m => Event t a -> m (ReadPhase m (Maybe a))
+subscribeAndRead e = readEvent' <$> subscribeEvent e
+  
 runApp' :: (t ~ SpiderTimeline Global, m ~ SpiderHost Global)
         => (Event t eIn -> PerformEventT t m (Event t eOut))
         -> [Maybe eIn]

@@ -13,6 +13,7 @@
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE RecursiveDo #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Main where
@@ -20,47 +21,60 @@ module Main where
 import Criterion.Main
 import Criterion.Types
 
+import Control.Monad.Fix
+
 import Reflex
-import Reflex.Host.Class
 
-import Reflex.Test.Adjustable
+import Reflex.Bench.Adjustable
+import Test.Run
 
-import Data.Map (Map)
-import qualified Data.Map as Map
+import Data.IntMap.Strict (IntMap)
+import Data.These
+import Data.Align (align)
+import Data.Functor.Identity
+
+import Data.Foldable
+
+
+type Network a b = forall t m. (Adjustable t m, MonadHold t m, MonadFix m) => Event t a -> m (Event t b)
+
+benchmarkApp ::  [Maybe a] -> Network a b -> Benchmarkable
+benchmarkApp occs network = perRunEnv (runSetup network subscribeAndRead) (\f -> traverse_ f occs)
 
 
 
-benchmarks :: [(String, Int -> IO ())]
-benchmarks = implGroup "spider" runSpiderHost cases
-  where
-    implGroup :: (MonadReflexHost' t m, MonadSample t m) => String -> (forall a. m a -> IO a) -> [(String, TestCase)] -> [(String, Int -> IO ())]
-    implGroup name runHost = group name . fmap (second (benchFiring runHost))
-    group name = fmap $ first ((name <> "/") <>)
-    sub n frames = group ("subscribing " ++ show (n, frames)) $ Focused.subscribing n frames
-    firing n     = group ("firing "    <> show n) $ Focused.firing n
-    merging n    = group ("merging "   <> show n) $ Focused.merging n
-    dynamics n   = group ("dynamics "  <> show n) $ Focused.dynamics n
-    cases = concat
-      [ sub 100 40
-      , dynamics 100
-      , dynamics 1000
-      , firing 1000
-      , firing 10000
-      , merging 10
-      , merging 50
-      , merging 100
-      , merging 200
-      ]
 
-pattern RunTestCaseFlag = "--run-test-case"
+overhead :: Network a b -> [Maybe a] -> Benchmark
+overhead app actions =  bgroup "overhead" $ 
+  [ bench "base" $ benchmarkApp actions app  
+  , bench "ReaderT" $ benchmarkApp actions (\input -> alignDyn <$> runDynamicWriterT (app input)) 
 
-spawnBenchmark :: String -> Benchmark
-spawnBenchmark name = bench name . toBenchmarkable $ \n -> do
-  self <- getExecutablePath
-  callProcess self [RunTestCaseFlag, name, show n, "+RTS", "-N1"]
+  , bench "DynamicWriterT" $ benchmarkApp actions (\input -> alignDyn <$> runDynamicWriterT (app input)) 
+  , bench "EventWriterT" $ benchmarkApp actions (\input -> alignE <$> runEventWriterT (app input)) 
+  , bench "RequesterT " $ benchmarkApp actions $ \input -> do
+      rec
+        (out, req) <- runRequesterT (app input) resp 
+        let (Identity resp) = traverseRequesterData Identity req
+      return (align out req)
 
-foreign import ccall unsafe "myCapabilityHasOtherRunnableThreads" myCapabilityHasOtherRunnableThreads :: IO Bool
+  ] where
+
+    alignDyn (e, d :: Dynamic t [b] ) = align e (updated d)
+    alignE (e, e' :: Event t [b]) = align e e'
+
+
+
+
+
+widget :: (Adjustable t m, MonadHold t m, MonadFix m) => Word -> Event t Word -> m (Event t Word)
+widget a e = updated <$> foldDyn (+) a e
+
 
 main :: IO ()
-main = defaultMainWith $ fmap (spawnBenchmark . fst) benchmarks
-  where config = defaultConfig { timeLimit = 20, csvFile = Just "dmap-original.csv", reportFile = Just "report.html" }
+main = defaultMainWith config benchmarks where 
+  config = defaultConfig 
+    { timeLimit = 5
+    }
+  benchmarks = 
+    [overhead (simpleApp mempty widget) (Just <$> addRemove 1000)
+    ]
