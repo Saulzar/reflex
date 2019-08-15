@@ -62,8 +62,10 @@ simpleApp initial widget action = traverseIntMapView initial (maybeChange `mapMa
     widget' k v = widget v (selectInt events k) 
       
 
-addRemove :: Int -> [Action]
-addRemove n = mconcat . fmap mconcat $ [adding <$> [1..n], firing <$> [1..n], removing <$> [1..n]] where
-  adding k = [add k (fromIntegral k), event k (fromIntegral (k * 2))]
-  firing k = [event k (fromIntegral k)]
-  removing k = [delete k]
+addRemove :: Int -> Int -> [Action]
+addRemove numWidgets numEvents = mconcat . fmap mconcat $ 
+  [adding <$> [1..numWidgets], firing <$> [1..numWidgets], removing <$> [1..numWidgets]] 
+  where
+    adding k = [add k (fromIntegral k), event k (fromIntegral (k * 2))]
+    firing k = event k . fromIntegral . (k + ) <$> [1..numEvents]
+    removing k = [delete k]
