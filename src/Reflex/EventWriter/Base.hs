@@ -129,8 +129,8 @@ instance MonadHold t m => MonadHold t (EventWriterT t w m) where
   holdDyn v0 = lift . holdDyn v0
   {-# INLINABLE holdIncremental #-}
   holdIncremental v0 = lift . holdIncremental v0
-  {-# INLINABLE buildDynamic #-}
-  buildDynamic a0 = lift . buildDynamic a0
+  {-# INLINABLE buildDyn #-}
+  buildDyn = lift . buildDyn 
   {-# INLINABLE headE #-}
   headE = lift . headE
 

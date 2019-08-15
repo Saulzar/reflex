@@ -168,11 +168,11 @@ deriving instance Functor (Dynamic t) => Functor (Dynamic (ProfiledTimeline t))
 deriving instance Applicative (Dynamic t) => Applicative (Dynamic (ProfiledTimeline t))
 deriving instance Monad (Dynamic t) => Monad (Dynamic (ProfiledTimeline t))
 
-instance MonadHold t m => MonadHold (ProfiledTimeline t) (ProfiledM m) where
+instance (MonadHold t m, Reflex t) => MonadHold (ProfiledTimeline t) (ProfiledM m) where
   hold v0 (Event_Profiled v') = ProfiledM $ Behavior_Profiled <$> hold v0 v'
   holdDyn v0 (Event_Profiled v') = ProfiledM $ Dynamic_Profiled <$> holdDyn v0 v'
   holdIncremental v0 (Event_Profiled v') = ProfiledM $ Incremental_Profiled <$> holdIncremental v0 v'
-  buildDynamic (ProfiledM v0) (Event_Profiled v') = ProfiledM $ Dynamic_Profiled <$> buildDynamic v0 v'
+  buildDyn (ProfiledM p) = ProfiledM $ Dynamic_Profiled  <$> buildDyn (unDynamic_Profiled <$> p)
   headE (Event_Profiled e) = ProfiledM $ Event_Profiled <$> headE e
 
 instance MonadSample t m => MonadSample (ProfiledTimeline t) (ProfiledM m) where

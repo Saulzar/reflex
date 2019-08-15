@@ -190,10 +190,8 @@ instance (Enum t, HasTrie t, Ord t) => MonadHold (Pure t) ((->) t) where
 
   holdDyn v0 = buildDynamic (return v0)
 
-  buildDynamic :: (t -> a) -> Event (Pure t) a -> t -> Dynamic (Pure t) a
-  buildDynamic initialValue e initialTime =
-    let Behavior f = hold (initialValue initialTime) e initialTime
-    in Dynamic $ \t -> (f t, unEvent e t)
+  buildDyn :: (t -> Dynamic (Pure t) a) -> t -> Dynamic (Pure t) a
+  buildDyn = id
 
   holdIncremental :: Patch p => PatchTarget p -> Event (Pure t) p -> t -> Incremental (Pure t) p
   holdIncremental initialValue e initialTime = Incremental $ \t -> (f t, unEvent e t)

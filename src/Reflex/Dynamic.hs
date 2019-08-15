@@ -192,6 +192,27 @@ switchPromptlyDyn de =
       eCoincidences = coincidence $ updated de
   in leftmost [eCoincidences, eLag]
 
+untilE :: (Reflex t, MonadHold t m, MonadFix m) => (a -> Bool) -> Event t a -> m (Event t a)
+untilE f e = do
+  last <- headE (ffilter f e)
+  switchHold e (never <$ last)
+
+holdDynUntil :: (Reflex t, MonadHold t m, MonadFix m) => (a -> Bool) -> Dynamic t a -> m (Dynamic t a)
+holdDynUntil f d =  buildDynamic (sample (current d)) =<< untilE f (updated d)
+  
+
+-- pushDyn :: (Reflex t, MonadHold t m) => (a -> PushM t b) -> Dynamic t a -> m (Dynamic t b)
+-- pushDyn f d = buildDynamic (sample (current d) >>= f) (pushAlways f (updated d))
+
+
+-- holdDynUntil' :: (Reflex t, MonadHold t m, MonadFix m) => (a -> Bool) -> Dynamic t a -> m (Dynamic t a)
+-- holdDynUntil' f d = join <$> pushDyn (\a -> if f a then (pure a) else d)
+
+--   pushDyn f d = buildDynamic (sample (current d) >>= f) (pushAlways f (updated d))
+
+
+-- holdWhen f d =  >>= \e -> fmap join (buildDynamic (sample (current d)) e)  
+
 -- | Split a 'Dynamic' pair into a pair of 'Dynamic's
 splitDynPure :: Reflex t => Dynamic t (a, b) -> (Dynamic t a, Dynamic t b)
 splitDynPure d = (fmap fst d, fmap snd d)
