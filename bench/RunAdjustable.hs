@@ -53,8 +53,8 @@ overhead app actions =  bgroup "overhead" $
   , bench "EventWriterT" $ benchmarkApp actions (\input -> alignE <$> runEventWriterT (app input)) 
   , bench "RequesterT " $ benchmarkApp actions $ \input -> do
       rec
-        (out, req) <- runRequesterT (app input) resp 
-        let (Identity resp) = traverseRequesterData Identity req
+        (out, req) <- runRequesterT (app input) $ 
+          traverseRequesterData Identity <$> req
       return (align out req)
 
   ] where
