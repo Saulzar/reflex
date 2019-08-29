@@ -33,6 +33,11 @@ flag expose-all-unfoldings
   default: False
   manual: True
 
+flag debug-cycles
+  description: Detect cycles and provide a stack trace (tree) of the detected cycle.
+  default: False
+  manual: True
+
 flag debug-trace-events
   description: Add instrumentation that outputs the stack trace of the definition of an event whenever it is subscribed to. Warning: It is very slow!
   default: False
@@ -110,6 +115,12 @@ library
   if flag(debug-trace-events)
     cpp-options: -DDEBUG_TRACE_EVENTS
     build-depends: bytestring
+
+
+  if flag(debug-cycles)
+    cpp-options: -DDEBUG_CYCLES
+    build-depends: bytestring
+
 
   if flag(use-reflex-optimizer)
     cpp-options: -DUSE_REFLEX_OPTIMIZER

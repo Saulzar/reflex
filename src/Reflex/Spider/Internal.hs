@@ -59,7 +59,7 @@ import Data.Proxy
 import Data.These
 import Data.Traversable
 import Data.Word
-import GHC.Exts
+import GHC.Exts hiding (toList)
 import GHC.IORef (IORef (..))
 import GHC.Stack
 import Reflex.FunctorMaybe
